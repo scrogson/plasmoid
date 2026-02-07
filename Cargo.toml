@@ -1,0 +1,32 @@
+[package]
+name = "plasmoid"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Networking
+iroh = "0.96"
+
+# WASM Runtime
+wasmtime = { version = "41", features = ["component-model", "async"] }
+
+# Authorization
+cedar-policy = "4"
+
+# Serialization
+postcard = { version = "1", features = ["alloc"] }
+serde = { version = "1", features = ["derive"] }
+
+# Async
+tokio = { version = "1", features = ["full"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"

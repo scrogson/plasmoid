@@ -1,0 +1,4 @@
+[tools]
+rust = "stable"
+"cargo:cargo-component" = "latest"
+"cargo:wasm-tools" = "latest"
