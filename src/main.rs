@@ -1,5 +1,4 @@
 use anyhow::Result;
-use plasmoid::ActorRuntime;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -10,8 +9,9 @@ async fn main() -> Result<()> {
 
     tracing::info!("Starting Plasmoid actor runtime");
 
-    let runtime = ActorRuntime::new().await?;
-    runtime.run().await?;
+    // TODO: Initialize ActorRuntime once implemented
+    // let runtime = ActorRuntime::new().await?;
+    // runtime.run().await?;
 
     Ok(())
 }
