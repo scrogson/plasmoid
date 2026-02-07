@@ -1,6 +1,6 @@
 use crate::host::Database;
 use crate::policy::PolicySet;
-use crate::runtime::WasmActor;
+use crate::runtime::{accept, WasmActor};
 use anyhow::Result;
 use iroh::{Endpoint, EndpointAddr, EndpointId};
 use std::collections::HashMap;
@@ -81,12 +81,27 @@ impl ActorRuntime {
         self.actors.read().await.contains_key(alpn)
     }
 
-    /// Run the runtime (placeholder - will add accept loop later).
+    /// Run the accept loop.
     pub async fn run(&self) -> Result<()> {
-        tracing::info!(endpoint_id = %self.node_id(), "Actor runtime started");
-        // TODO: Add accept loop
-        tokio::signal::ctrl_c().await?;
-        tracing::info!("Actor runtime shutting down");
+        tracing::info!(node_id = %self.node_id(), "Actor runtime accepting connections");
+
+        loop {
+            tokio::select! {
+                Some(incoming) = self.endpoint.accept() => {
+                    let actors = self.actors.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = accept::handle_incoming(incoming, actors).await {
+                            tracing::error!(error = %e, "Failed to handle incoming connection");
+                        }
+                    });
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    tracing::info!("Shutting down");
+                    break;
+                }
+            }
+        }
+
         Ok(())
     }
 }
