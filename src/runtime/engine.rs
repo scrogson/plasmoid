@@ -89,8 +89,10 @@ impl ActorRuntime {
             tokio::select! {
                 Some(incoming) = self.endpoint.accept() => {
                     let actors = self.actors.clone();
+                    let engine = self.engine.clone();
+                    let database = self.database.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = accept::handle_incoming(incoming, actors).await {
+                        if let Err(e) = accept::handle_incoming(incoming, actors, engine, database).await {
                             tracing::error!(error = %e, "Failed to handle incoming connection");
                         }
                     });
