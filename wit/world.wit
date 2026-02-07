@@ -1,0 +1,56 @@
+package plasmoid:actor@0.1.0;
+
+// Runtime-provided interfaces
+
+interface logging {
+    enum level {
+        trace,
+        debug,
+        info,
+        warn,
+        error,
+    }
+
+    log: func(level: level, message: string);
+}
+
+interface actor-context {
+    /// Get this actor's identity
+    self-id: func() -> string;
+
+    /// Get the caller's identity (if known)
+    remote-id: func() -> option<string>;
+}
+
+interface database {
+    /// Get a value by key
+    get: func(key: string) -> option<list<u8>>;
+
+    /// Set a value
+    set: func(key: string, value: list<u8>) -> result<_, string>;
+
+    /// Delete a key, returns true if it existed
+    delete: func(key: string) -> result<bool, string>;
+
+    /// List keys with a given prefix
+    list-keys: func(prefix: string) -> list<string>;
+}
+
+// Actor-provided interface
+
+/// The interface that actors must implement
+interface handler {
+    /// Handle an incoming request and return a response
+    handle: func(request: list<u8>) -> result<list<u8>, string>;
+}
+
+/// The world defines what an actor exports and imports
+world actor {
+    /// Actor must implement the handler interface
+    export handler;
+
+    /// Runtime provides these (capability-gated)
+    import logging;
+    import actor-context;
+    import database;
+}
