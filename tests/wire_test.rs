@@ -1,40 +1,41 @@
-use plasmoid::wire::{deserialize, serialize, Message};
+use plasmoid::wire::{Request, Response, serialize, deserialize};
 
 #[test]
 fn test_roundtrip_request() {
-    let msg = Message::Request {
+    let req = Request {
         id: 1,
-        payload: b"hello".to_vec(),
+        function: "echo".to_string(),
+        args: vec!["\"hello world\"".to_string()],
     };
 
-    let bytes = serialize(&msg).unwrap();
-    let decoded: Message = deserialize(&bytes).unwrap();
+    let bytes = serialize(&req).unwrap();
+    let decoded: Request = deserialize(&bytes).unwrap();
 
-    assert_eq!(msg, decoded);
+    assert_eq!(req, decoded);
 }
 
 #[test]
-fn test_roundtrip_response() {
-    let msg = Message::Response {
+fn test_roundtrip_response_ok() {
+    let resp = Response {
         id: 1,
-        payload: Ok(b"world".to_vec()),
+        result: Ok(vec!["\"hello world\"".to_string()]),
     };
 
-    let bytes = serialize(&msg).unwrap();
-    let decoded: Message = deserialize(&bytes).unwrap();
+    let bytes = serialize(&resp).unwrap();
+    let decoded: Response = deserialize(&bytes).unwrap();
 
-    assert_eq!(msg, decoded);
+    assert_eq!(resp, decoded);
 }
 
 #[test]
-fn test_roundtrip_error_response() {
-    let msg = Message::Response {
+fn test_roundtrip_response_err() {
+    let resp = Response {
         id: 1,
-        payload: Err("something went wrong".to_string()),
+        result: Err("not found".to_string()),
     };
 
-    let bytes = serialize(&msg).unwrap();
-    let decoded: Message = deserialize(&bytes).unwrap();
+    let bytes = serialize(&resp).unwrap();
+    let decoded: Response = deserialize(&bytes).unwrap();
 
-    assert_eq!(msg, decoded);
+    assert_eq!(resp, decoded);
 }

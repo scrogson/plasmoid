@@ -1,10 +1,21 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// A request to call a function on an actor.
+/// Arguments are wasm-wave encoded strings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Message {
-    Request { id: u64, payload: Vec<u8> },
-    Response { id: u64, payload: Result<Vec<u8>, String> },
+pub struct Request {
+    pub id: u64,
+    pub function: String,
+    pub args: Vec<String>,
+}
+
+/// A response from an actor function call.
+/// Results are wasm-wave encoded strings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Response {
+    pub id: u64,
+    pub result: Result<Vec<String>, String>,
 }
 
 #[derive(Debug, Error)]
