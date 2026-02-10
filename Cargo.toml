@@ -8,7 +8,7 @@ edition = "2024"
 iroh = "0.96"
 
 # WASM Runtime
-wasmtime = { version = "41", features = ["component-model", "async"] }
+wasmtime = { version = "41", features = ["component-model", "wave"] }
 
 # Authorization
 cedar-policy = "4"
@@ -16,7 +16,7 @@ cedar-policy = "4"
 # Serialization
 postcard = { version = "1", features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
-wasm-wave = "0.244"
+wasm-wave = "0.243"
 
 # Async
 tokio = { version = "1", features = ["full"] }

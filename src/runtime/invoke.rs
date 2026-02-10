@@ -1,153 +1,223 @@
 //! WASM actor invocation module.
 //!
 //! This module handles instantiating WASM components and invoking their
-//! handler functions with proper host function linking.
+//! exported functions with dynamic dispatch using wasm-wave typed values.
 
-use crate::host::{log_message, Database, HostState, LogLevel};
+use crate::host::{log_message, HostState, LogLevel};
 use crate::policy::PolicySet;
 use anyhow::{anyhow, Result};
-use std::sync::Arc;
-use wasmtime::component::{Component, Linker, Val};
-use wasmtime::{Engine, Store};
+use wasmtime::component::{Component, Linker, Type, Val};
+use wasmtime::component::types::ComponentItem;
+use wasmtime::Engine;
 
-/// Trait for types that can be invoked as actors.
-pub trait ActorLike {
-    /// Get the WASM component.
-    fn component(&self) -> &Component;
-    /// Get the actor's capabilities.
-    fn capabilities(&self) -> &PolicySet;
-}
+/// Invoke a function on a WASM actor component.
+///
+/// This performs dynamic dispatch: it searches the component's exports for a
+/// function matching the given name, parses the wasm-wave encoded arguments
+/// into typed `Val`s, calls the function, and returns wasm-wave encoded results.
+///
+/// # Arguments
+///
+/// * `engine` - The wasmtime engine
+/// * `component` - The compiled WASM component
+/// * `capabilities` - Cedar policy set for this actor
+/// * `actor_id` - The actor's identifier (ALPN string)
+/// * `remote_node_id` - The caller's node ID, if known
+/// * `function` - The function name to call (matched against export suffixes)
+/// * `args` - wasm-wave encoded argument strings
+///
+/// # Returns
+///
+/// A vector of wasm-wave encoded result strings.
+pub fn invoke_actor(
+    engine: &Engine,
+    component: &Component,
+    capabilities: &PolicySet,
+    actor_id: &str,
+    remote_node_id: Option<String>,
+    function: &str,
+    args: &[String],
+) -> Result<Vec<String>> {
+    // Create host state for this invocation
+    let mut state = HostState::new(actor_id.to_string(), capabilities.clone());
+    state.set_remote_node_id(remote_node_id);
 
-// Implement for WasmActor
-impl ActorLike for crate::runtime::WasmActor {
-    fn component(&self) -> &Component {
-        crate::runtime::WasmActor::component(self)
+    // Create a store for this invocation
+    let mut store = wasmtime::Store::new(engine, state);
+
+    // Create linker with host functions
+    let mut linker = Linker::<HostState>::new(engine);
+    add_host_functions(&mut linker, capabilities)?;
+
+    // Instantiate the component
+    let instance = linker.instantiate(&mut store, component)?;
+
+    // Find the exported function.
+    //
+    // Component model exports are hierarchical:
+    //   - Top-level can be functions directly, or interface instances
+    //   - Interface instances contain functions
+    //
+    // We first try a direct lookup by name. If that fails, we walk
+    // the component's export tree to find the function inside an
+    // exported interface instance.
+    let func = if let Some(func) = instance.get_func(&mut store, function) {
+        func
+    } else {
+        find_function_in_exports(engine, component, &instance, &mut store, function)?
+    };
+
+    tracing::debug!(function = %function, "Invoking actor function");
+
+    // Get the function's type to determine parameter and result types
+    let func_ty = func.ty(&store);
+    let param_types: Vec<(String, Type)> = func_ty
+        .params()
+        .map(|(name, ty)| (name.to_string(), ty))
+        .collect();
+    let result_types: Vec<Type> = func_ty.results().collect();
+
+    // Parse wasm-wave encoded arguments into typed Vals
+    if args.len() != param_types.len() {
+        return Err(anyhow!(
+            "function '{}' expects {} arguments but got {}",
+            function,
+            param_types.len(),
+            args.len()
+        ));
     }
 
-    fn capabilities(&self) -> &PolicySet {
-        crate::runtime::WasmActor::capabilities(self)
-    }
+    let params: Vec<Val> = args
+        .iter()
+        .zip(param_types.iter())
+        .map(|(wave_str, (_name, ty))| {
+            wasm_wave::from_str::<Val>(ty, wave_str).map_err(|e| {
+                anyhow!(
+                    "failed to parse argument '{}' as {}: {}",
+                    wave_str,
+                    wasm_wave::wasm::DisplayType(ty),
+                    e
+                )
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    // Prepare result slots
+    let mut results: Vec<Val> = result_types
+        .iter()
+        .map(|_| Val::Bool(false))
+        .collect();
+
+    // Call the function
+    func.call(&mut store, &params, &mut results)?;
+
+    // Post-return cleanup (required by component model)
+    func.post_return(&mut store)?;
+
+    // Encode results as wasm-wave strings
+    let wave_results: Vec<String> = results
+        .iter()
+        .map(|val| {
+            wasm_wave::to_string(val)
+                .map_err(|e| anyhow!("failed to encode result: {}", e))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(wave_results)
 }
 
-/// Context for invoking a WASM actor.
-pub struct InvokeContext {
-    engine: Engine,
-    database: Arc<Database>,
-}
+/// Search for a function export by walking the component's export tree.
+///
+/// Component model exports are structured hierarchically:
+///   top-level: interface instances like "namespace:package/interface@version"
+///   nested: functions like "func-name" inside those instances
+///
+/// This function enumerates the component's top-level exports, and for each
+/// interface instance, looks inside for the named function.
+fn find_function_in_exports(
+    engine: &Engine,
+    component: &Component,
+    instance: &wasmtime::component::Instance,
+    store: &mut wasmtime::Store<HostState>,
+    function_name: &str,
+) -> Result<wasmtime::component::Func> {
+    // Get the component's type-level exports to discover interface names
+    let component_type = component.component_type();
 
-impl InvokeContext {
-    /// Create a new invoke context.
-    pub fn new(engine: Engine, database: Arc<Database>) -> Self {
-        Self { engine, database }
-    }
+    for (export_name, item) in component_type.exports(engine) {
+        match item {
+            ComponentItem::ComponentInstance(ci) => {
+                // Check if this interface instance contains our function
+                for (func_name, func_item) in ci.exports(engine) {
+                    if func_name == function_name {
+                        if let ComponentItem::ComponentFunc(_) = func_item {
+                            // Found it! Now resolve through the runtime instance.
+                            // First get the interface's export index, then the function's.
+                            let iface_index = component
+                                .get_export_index(None, export_name)
+                                .ok_or_else(|| {
+                                    anyhow!(
+                                        "interface '{}' not found at runtime",
+                                        export_name
+                                    )
+                                })?;
 
-    /// Invoke a WASM actor with a request payload.
-    pub fn invoke<A: ActorLike>(
-        &self,
-        actor: &A,
-        actor_id: &str,
-        remote_node_id: Option<String>,
-        request: Vec<u8>,
-    ) -> Result<Vec<u8>> {
-        // Create host state for this invocation
-        let mut state = HostState::new(actor_id.to_string(), actor.capabilities().clone());
-        state.set_remote_node_id(remote_node_id);
+                            let func_index = component
+                                .get_export_index(Some(&iface_index), function_name)
+                                .ok_or_else(|| {
+                                    anyhow!(
+                                        "function '{}' not found in interface '{}'",
+                                        function_name,
+                                        export_name,
+                                    )
+                                })?;
 
-        // Create a store for this invocation
-        let mut store = Store::new(&self.engine, InvokeState {
-            host_state: state,
-            database: self.database.clone(),
-        });
+                            let func = instance
+                                .get_func(&mut *store, &func_index)
+                                .ok_or_else(|| {
+                                    anyhow!(
+                                        "function '{}' in '{}' could not be resolved",
+                                        function_name,
+                                        export_name,
+                                    )
+                                })?;
 
-        // Create linker with host functions
-        let mut linker = Linker::<InvokeState>::new(&self.engine);
-        add_host_functions(&mut linker, actor.capabilities())?;
-
-        // Instantiate the component
-        let instance = linker.instantiate(&mut store, actor.component())?;
-
-        // Get the handler export and call it
-        // The function is exported as "plasmoid:actor/handler@0.1.0#handle"
-        let func = instance
-            .get_func(&mut store, "plasmoid:actor/handler@0.1.0#handle")
-            .ok_or_else(|| anyhow!("handler function not found"))?;
-
-        // Call the function with the request bytes
-        // The function signature is: handle(request: list<u8>) -> result<list<u8>, string>
-        let request_val = Val::List(
-            request
-                .into_iter()
-                .map(|b| Val::U8(b))
-                .collect(),
-        );
-
-        let mut results = vec![Val::Bool(false)]; // placeholder, will be replaced
-        func.call(&mut store, &[request_val], &mut results)?;
-
-        // Parse the result
-        // The result is a result<list<u8>, string> which comes back as a variant
-        parse_result(&results[0])
-    }
-}
-
-/// Internal state for an invocation.
-struct InvokeState {
-    host_state: HostState,
-    database: Arc<Database>,
-}
-
-/// Parse a result<list<u8>, string> value.
-fn parse_result(val: &Val) -> Result<Vec<u8>> {
-    match val {
-        Val::Result(result) => {
-            match result.as_ref() {
-                Ok(Some(inner)) => {
-                    // Success case - extract the list<u8>
-                    if let Val::List(list) = &**inner {
-                        let bytes: Vec<u8> = list
-                            .iter()
-                            .map(|v| match v {
-                                Val::U8(b) => Ok(*b),
-                                _ => Err(anyhow!("expected u8 in list")),
-                            })
-                            .collect::<Result<Vec<u8>>>()?;
-                        Ok(bytes)
-                    } else {
-                        Err(anyhow!("expected list in result"))
+                            return Ok(func);
+                        }
                     }
-                }
-                Ok(None) => {
-                    // Success with no payload (unit)
-                    Ok(vec![])
-                }
-                Err(Some(inner)) => {
-                    // Error case - extract the string
-                    if let Val::String(s) = &**inner {
-                        Err(anyhow!("actor error: {}", s))
-                    } else {
-                        Err(anyhow!("actor returned error"))
-                    }
-                }
-                Err(None) => {
-                    Err(anyhow!("actor returned error"))
                 }
             }
+            ComponentItem::ComponentFunc(_) => {
+                // Top-level function export -- already checked by get_func above,
+                // but try again with the exact export name in case of naming mismatch
+                if export_name == function_name {
+                    if let Some(func) = instance.get_func(&mut *store, export_name) {
+                        return Ok(func);
+                    }
+                }
+            }
+            _ => {}
         }
-        _ => Err(anyhow!("expected result type, got {:?}", val)),
     }
+
+    Err(anyhow!(
+        "function '{}' not found in any exported interface",
+        function_name,
+    ))
 }
 
-fn add_host_functions(linker: &mut Linker<InvokeState>, capabilities: &PolicySet) -> Result<()> {
-    // Add logging interface
-    // Always available if logging capability is granted
+/// Add host functions to the linker based on capabilities.
+fn add_host_functions(linker: &mut Linker<HostState>, capabilities: &PolicySet) -> Result<()> {
+    // Add logging interface: plasmoid:runtime/logging@0.1.0
     {
-        let mut logging = linker.instance("plasmoid:actor/logging@0.1.0")?;
+        let mut logging = linker.instance("plasmoid:runtime/logging@0.1.0")?;
 
         if capabilities.allows("logging") {
             logging.func_wrap(
                 "log",
-                |caller: wasmtime::StoreContextMut<'_, InvokeState>, (level, message): (u32, String)| {
-                    let state = &caller.data().host_state;
+                |caller: wasmtime::StoreContextMut<'_, HostState>,
+                 (level, message): (u32, String)| {
+                    let state = caller.data();
                     log_message(state, LogLevel::from(level), &message);
                     Ok(())
                 },
@@ -156,113 +226,58 @@ fn add_host_functions(linker: &mut Linker<InvokeState>, capabilities: &PolicySet
             // Provide a no-op implementation
             logging.func_wrap(
                 "log",
-                |_caller: wasmtime::StoreContextMut<'_, InvokeState>, (_level, _message): (u32, String)| {
-                    Ok(())
-                },
+                |_caller: wasmtime::StoreContextMut<'_, HostState>,
+                 (_level, _message): (u32, String)| { Ok(()) },
             )?;
         }
     }
 
-    // Add actor-context interface
+    // Add actor-context interface: plasmoid:runtime/actor-context@0.1.0
     {
-        let mut context = linker.instance("plasmoid:actor/actor-context@0.1.0")?;
+        let mut context = linker.instance("plasmoid:runtime/actor-context@0.1.0")?;
 
         context.func_wrap(
             "self-id",
-            |caller: wasmtime::StoreContextMut<'_, InvokeState>, _: ()| -> Result<(String,), _> {
-                let id = caller.data().host_state.actor_id().to_string();
+            |caller: wasmtime::StoreContextMut<'_, HostState>,
+             _: ()|
+             -> Result<(String,), _> {
+                let id = caller.data().actor_id().to_string();
                 Ok((id,))
             },
         )?;
 
         context.func_wrap(
             "remote-id",
-            |caller: wasmtime::StoreContextMut<'_, InvokeState>, _: ()| -> Result<(Option<String>,), _> {
-                let id = caller.data().host_state.remote_node_id().cloned();
+            |caller: wasmtime::StoreContextMut<'_, HostState>,
+             _: ()|
+             -> Result<(Option<String>,), _> {
+                let id = caller.data().remote_node_id().cloned();
                 Ok((id,))
             },
         )?;
-    }
 
-    // Add database interface
-    {
-        let mut database = linker.instance("plasmoid:actor/database@0.1.0")?;
-
-        // get: func(key: string) -> option<list<u8>>
-        database.func_wrap(
-            "get",
-            |caller: wasmtime::StoreContextMut<'_, InvokeState>, (key,): (String,)| -> Result<(Option<Vec<u8>>,), _> {
-                if !caller.data().host_state.capabilities().allows("db:read") {
-                    return Ok((None,));
-                }
-                let scoped_key = format!("{}:{}", caller.data().host_state.actor_id(), key);
-                let result = caller.data().database.get(&scoped_key);
-                Ok((result,))
+        // call: func(alpn: string, function: string, args: list<string>) -> result<list<string>, string>
+        context.func_wrap(
+            "call",
+            |_caller: wasmtime::StoreContextMut<'_, HostState>,
+             (_alpn, _function, _args): (String, String, Vec<String>)|
+             -> Result<(Result<Vec<String>, String>,), _> {
+                // TODO: implement cross-actor calls
+                Ok((Err("actor:call not yet implemented".to_string()),))
             },
         )?;
 
-        // set: func(key: string, value: list<u8>) -> result<_, string>
-        database.func_wrap(
-            "set",
-            |caller: wasmtime::StoreContextMut<'_, InvokeState>, (key, value): (String, Vec<u8>)| -> Result<(Result<(), String>,), _> {
-                if !caller.data().host_state.capabilities().allows("db:write") {
-                    return Ok((Err("db:write capability not granted".to_string()),));
-                }
-                let scoped_key = format!("{}:{}", caller.data().host_state.actor_id(), key);
-                match caller.data().database.set(&scoped_key, value) {
-                    Ok(()) => Ok((Ok(()),)),
-                    Err(e) => Ok((Err(e.to_string()),)),
-                }
-            },
-        )?;
-
-        // delete: func(key: string) -> result<bool, string>
-        database.func_wrap(
-            "delete",
-            |caller: wasmtime::StoreContextMut<'_, InvokeState>, (key,): (String,)| -> Result<(Result<bool, String>,), _> {
-                if !caller.data().host_state.capabilities().allows("db:write") {
-                    return Ok((Err("db:write capability not granted".to_string()),));
-                }
-                let scoped_key = format!("{}:{}", caller.data().host_state.actor_id(), key);
-                match caller.data().database.delete(&scoped_key) {
-                    Ok(deleted) => Ok((Ok(deleted),)),
-                    Err(e) => Ok((Err(e.to_string()),)),
-                }
-            },
-        )?;
-
-        // list-keys: func(prefix: string) -> list<string>
-        database.func_wrap(
-            "list-keys",
-            |caller: wasmtime::StoreContextMut<'_, InvokeState>, (prefix,): (String,)| -> Result<(Vec<String>,), _> {
-                if !caller.data().host_state.capabilities().allows("db:read") {
-                    return Ok((vec![],));
-                }
-                let scoped_prefix = format!("{}:{}", caller.data().host_state.actor_id(), prefix);
-                let keys = caller.data().database.list_keys(&scoped_prefix);
-                // Strip the actor prefix from returned keys
-                let actor_prefix = format!("{}:", caller.data().host_state.actor_id());
-                let stripped: Vec<String> = keys
-                    .into_iter()
-                    .map(|k| k.strip_prefix(&actor_prefix).unwrap_or(&k).to_string())
-                    .collect();
-                Ok((stripped,))
+        // notify: func(alpn: string, function: string, args: list<string>) -> result<_, string>
+        context.func_wrap(
+            "notify",
+            |_caller: wasmtime::StoreContextMut<'_, HostState>,
+             (_alpn, _function, _args): (String, String, Vec<String>)|
+             -> Result<(Result<(), String>,), _> {
+                // TODO: implement fire-and-forget notifications
+                Ok((Err("actor:notify not yet implemented".to_string()),))
             },
         )?;
     }
 
     Ok(())
-}
-
-/// Invoke a WASM actor (convenience function).
-pub fn invoke_actor<A: ActorLike>(
-    engine: &Engine,
-    database: &Arc<Database>,
-    actor: &A,
-    actor_id: &str,
-    remote_node_id: Option<String>,
-    request: Vec<u8>,
-) -> Result<Vec<u8>> {
-    let ctx = InvokeContext::new(engine.clone(), database.clone());
-    ctx.invoke(actor, actor_id, remote_node_id, request)
 }

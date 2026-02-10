@@ -1,4 +1,3 @@
-use crate::host::Database;
 use crate::policy::PolicySet;
 use crate::runtime::{accept, WasmActor};
 use anyhow::Result;
@@ -13,7 +12,6 @@ pub struct ActorRuntime {
     endpoint: Endpoint,
     engine: Engine,
     actors: Arc<RwLock<HashMap<Vec<u8>, WasmActor>>>,
-    database: Arc<Database>,
 }
 
 impl ActorRuntime {
@@ -22,7 +20,6 @@ impl ActorRuntime {
         // Configure wasmtime
         let mut config = Config::new();
         config.wasm_component_model(true);
-        config.async_support(true);
         let engine = Engine::new(&config)?;
 
         // Configure iroh endpoint with default settings
@@ -34,7 +31,6 @@ impl ActorRuntime {
             endpoint,
             engine,
             actors: Arc::new(RwLock::new(HashMap::new())),
-            database: Arc::new(Database::new()),
         })
     }
 
@@ -56,11 +52,6 @@ impl ActorRuntime {
     /// Get a reference to the WASM engine.
     pub fn engine(&self) -> &Engine {
         &self.engine
-    }
-
-    /// Get a reference to the shared database.
-    pub fn database(&self) -> &Arc<Database> {
-        &self.database
     }
 
     /// Deploy a WASM actor with the given ALPN and capabilities.
@@ -90,9 +81,8 @@ impl ActorRuntime {
                 Some(incoming) = self.endpoint.accept() => {
                     let actors = self.actors.clone();
                     let engine = self.engine.clone();
-                    let database = self.database.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = accept::handle_incoming(incoming, actors, engine, database).await {
+                        if let Err(e) = accept::handle_incoming(incoming, actors, engine).await {
                             tracing::error!(error = %e, "Failed to handle incoming connection");
                         }
                     });
