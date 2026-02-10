@@ -62,7 +62,13 @@ impl ActorRuntime {
         capabilities: PolicySet,
     ) -> Result<()> {
         let actor = WasmActor::new(&self.engine, wasm_bytes, capabilities)?;
-        self.actors.write().await.insert(alpn.clone(), actor);
+        let mut actors_guard = self.actors.write().await;
+        actors_guard.insert(alpn.clone(), actor);
+
+        // Update the endpoint's ALPN list so TLS handshakes succeed
+        let alpns: Vec<Vec<u8>> = actors_guard.keys().cloned().collect();
+        self.endpoint.set_alpns(alpns);
+
         tracing::info!(alpn = ?String::from_utf8_lossy(&alpn), "Actor deployed");
         Ok(())
     }

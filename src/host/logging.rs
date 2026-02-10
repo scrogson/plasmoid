@@ -1,11 +1,20 @@
 use crate::host::HostState;
+use wasmtime::component::{ComponentType, Lift, Lower};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Log level enum matching the WIT `plasmoid:runtime/logging@0.1.0` level type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ComponentType, Lift, Lower)]
+#[component(enum)]
+#[repr(u8)]
 pub enum LogLevel {
+    #[component(name = "trace")]
     Trace,
+    #[component(name = "debug")]
     Debug,
+    #[component(name = "info")]
     Info,
+    #[component(name = "warn")]
     Warn,
+    #[component(name = "error")]
     Error,
 }
 

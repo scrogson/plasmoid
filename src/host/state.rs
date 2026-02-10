@@ -1,13 +1,35 @@
 use crate::policy::PolicySet;
 use iroh::Endpoint;
+use wasmtime::component::ResourceTable;
+use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 /// State available to host functions during WASM execution.
-#[derive(Debug)]
 pub struct HostState {
     actor_id: String,
     capabilities: PolicySet,
     remote_node_id: Option<String>,
     endpoint: Option<Endpoint>,
+    wasi_ctx: WasiCtx,
+    resource_table: ResourceTable,
+}
+
+impl std::fmt::Debug for HostState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostState")
+            .field("actor_id", &self.actor_id)
+            .field("capabilities", &self.capabilities)
+            .field("remote_node_id", &self.remote_node_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl WasiView for HostState {
+    fn ctx(&mut self) -> WasiCtxView<'_> {
+        WasiCtxView {
+            ctx: &mut self.wasi_ctx,
+            table: &mut self.resource_table,
+        }
+    }
 }
 
 impl HostState {
@@ -17,6 +39,8 @@ impl HostState {
             capabilities,
             remote_node_id: None,
             endpoint: None,
+            wasi_ctx: WasiCtxBuilder::new().build(),
+            resource_table: ResourceTable::new(),
         }
     }
 

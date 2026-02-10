@@ -9,6 +9,7 @@ iroh = "0.96"
 
 # WASM Runtime
 wasmtime = { version = "41", features = ["component-model", "wave"] }
+wasmtime-wasi = "41"
 
 # Authorization
 cedar-policy = "4"

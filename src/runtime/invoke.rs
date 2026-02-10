@@ -212,6 +212,9 @@ fn find_function_in_exports(
 
 /// Add host functions to the linker based on capabilities.
 fn add_host_functions(linker: &mut Linker<HostState>, capabilities: &PolicySet) -> Result<()> {
+    // Add WASI interfaces (required by wasm32-wasip1 components)
+    wasmtime_wasi::p2::add_to_linker_sync(linker)?;
+
     // Add logging interface: plasmoid:runtime/logging@0.1.0
     {
         let mut logging = linker.instance("plasmoid:runtime/logging@0.1.0")?;
@@ -220,9 +223,9 @@ fn add_host_functions(linker: &mut Linker<HostState>, capabilities: &PolicySet) 
             logging.func_wrap(
                 "log",
                 |caller: wasmtime::StoreContextMut<'_, HostState>,
-                 (level, message): (u32, String)| {
+                 (level, message): (LogLevel, String)| {
                     let state = caller.data();
-                    log_message(state, LogLevel::from(level), &message);
+                    log_message(state, level, &message);
                     Ok(())
                 },
             )?;
@@ -231,7 +234,7 @@ fn add_host_functions(linker: &mut Linker<HostState>, capabilities: &PolicySet) 
             logging.func_wrap(
                 "log",
                 |_caller: wasmtime::StoreContextMut<'_, HostState>,
-                 (_level, _message): (u32, String)| { Ok(()) },
+                 (_level, _message): (LogLevel, String)| { Ok(()) },
             )?;
         }
     }
