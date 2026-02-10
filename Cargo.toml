@@ -17,6 +17,7 @@ cedar-policy = "4"
 # Serialization
 postcard = { version = "1", features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 wasm-wave = "0.243"
 
 # Async
