@@ -7,8 +7,8 @@ use tokio::sync::RwLock;
 use wasmtime::component::Component;
 use wasmtime::Engine;
 
-/// A compiled behavior (WASM component) that can be spawned as processes.
-pub struct BehaviorTemplate {
+/// A compiled component (WASM component) that can be spawned as processes.
+pub struct ComponentTemplate {
     pub component: Component,
     pub default_capabilities: PolicySet,
 }
@@ -17,11 +17,11 @@ pub struct BehaviorTemplate {
 pub struct ProcessEntry {
     pub pid: Pid,
     pub actor: WasmActor,
-    pub behavior: String,
+    pub component_name: String,
     pub name: Option<String>,
 }
 
-/// Local process registry — manages behaviors and running process instances.
+/// Local process registry — manages components and running process instances.
 ///
 /// Thread-safe: all internal state is behind RwLocks.
 pub struct ProcessRegistry {
@@ -29,7 +29,7 @@ pub struct ProcessRegistry {
     engine: Engine,
     processes: RwLock<HashMap<Pid, ProcessEntry>>,
     names: RwLock<HashMap<String, Pid>>,
-    behaviors: RwLock<HashMap<String, BehaviorTemplate>>,
+    components: RwLock<HashMap<String, ComponentTemplate>>,
 }
 
 impl std::fmt::Debug for ProcessRegistry {
@@ -45,34 +45,34 @@ impl ProcessRegistry {
             engine,
             processes: RwLock::new(HashMap::new()),
             names: RwLock::new(HashMap::new()),
-            behaviors: RwLock::new(HashMap::new()),
+            components: RwLock::new(HashMap::new()),
         }
     }
 
-    /// Register a compiled behavior (WASM component) by name.
-    pub async fn register_behavior(
+    /// Register a compiled component (WASM component) by name.
+    pub async fn register_component(
         &self,
         name: &str,
         wasm_bytes: &[u8],
         capabilities: PolicySet,
     ) -> Result<()> {
         let component = Component::from_binary(&self.engine, wasm_bytes)?;
-        let template = BehaviorTemplate {
+        let template = ComponentTemplate {
             component,
             default_capabilities: capabilities,
         };
-        self.behaviors
+        self.components
             .write()
             .await
             .insert(name.to_string(), template);
-        tracing::info!(behavior = %name, "Behavior registered");
+        tracing::info!(component = %name, "Component registered");
         Ok(())
     }
 
-    /// Spawn a new process from a registered behavior, optionally with a name.
+    /// Spawn a new process from a registered component, optionally with a name.
     pub async fn spawn(
         &self,
-        behavior: &str,
+        component: &str,
         name: Option<&str>,
         capabilities: Option<PolicySet>,
     ) -> Result<Pid> {
@@ -84,10 +84,10 @@ impl ProcessRegistry {
             }
         }
 
-        let behaviors = self.behaviors.read().await;
-        let template = behaviors
-            .get(behavior)
-            .ok_or_else(|| anyhow!("behavior '{}' not registered", behavior))?;
+        let components = self.components.read().await;
+        let template = components
+            .get(component)
+            .ok_or_else(|| anyhow!("component '{}' not registered", component))?;
 
         let caps = capabilities.unwrap_or_else(|| template.default_capabilities.clone());
         let actor = WasmActor::from_component(template.component.clone(), caps);
@@ -96,7 +96,7 @@ impl ProcessRegistry {
         let entry = ProcessEntry {
             pid: pid.clone(),
             actor,
-            behavior: behavior.to_string(),
+            component_name: component.to_string(),
             name: name.map(|s| s.to_string()),
         };
 
@@ -111,7 +111,7 @@ impl ProcessRegistry {
 
         tracing::info!(
             pid = %pid,
-            behavior = %behavior,
+            component = %component,
             name = ?name,
             "Process spawned"
         );
@@ -126,7 +126,7 @@ impl ProcessRegistry {
             pid: entry.pid.clone(),
             component: entry.actor.component().clone(),
             capabilities: entry.actor.capabilities().clone(),
-            behavior: entry.behavior.clone(),
+            component_name: entry.component_name.clone(),
             name: entry.name.clone(),
         })
     }
@@ -157,7 +157,7 @@ impl ProcessRegistry {
             .map(|entry| {
                 (
                     entry.pid.clone(),
-                    entry.behavior.clone(),
+                    entry.component_name.clone(),
                     entry.name.clone(),
                 )
             })
@@ -181,7 +181,7 @@ pub struct ProcessRef {
     pub pid: Pid,
     pub component: Component,
     pub capabilities: PolicySet,
-    pub behavior: String,
+    pub component_name: String,
     pub name: Option<String>,
 }
 
@@ -189,7 +189,7 @@ impl std::fmt::Debug for ProcessRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ProcessRef")
             .field("pid", &self.pid)
-            .field("behavior", &self.behavior)
+            .field("component_name", &self.component_name)
             .field("name", &self.name)
             .finish_non_exhaustive()
     }

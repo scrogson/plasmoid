@@ -1,5 +1,5 @@
 pub mod client;
-pub mod gossip;
+pub mod doc_registry;
 pub mod host;
 pub mod pid;
 pub mod policy;

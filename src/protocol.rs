@@ -1,7 +1,8 @@
-use crate::gossip::DistributedRegistry;
+use crate::doc_registry::{DocRegistry, ResolvedProcess};
 use crate::registry::ProcessRegistry;
 use crate::runtime::invoke::invoke_actor;
-use crate::wire::{deserialize, serialize, Request, Response, Target};
+use crate::runtime::PLASMOID_ALPN;
+use crate::wire::{self, deserialize, serialize, Request, Response, Target};
 use iroh::endpoint::Connection;
 use iroh::protocol::AcceptError;
 use iroh::Endpoint;
@@ -17,7 +18,7 @@ pub struct PlasmoidProtocol {
     registry: Arc<ProcessRegistry>,
     engine: Engine,
     endpoint: Endpoint,
-    distributed: Option<Arc<DistributedRegistry>>,
+    doc_registry: Option<Arc<DocRegistry>>,
 }
 
 impl PlasmoidProtocol {
@@ -25,13 +26,13 @@ impl PlasmoidProtocol {
         registry: Arc<ProcessRegistry>,
         engine: Engine,
         endpoint: Endpoint,
-        distributed: Option<Arc<DistributedRegistry>>,
+        doc_registry: Option<Arc<DocRegistry>>,
     ) -> Self {
         Self {
             registry,
             engine,
             endpoint,
-            distributed,
+            doc_registry,
         }
     }
 }
@@ -56,7 +57,7 @@ impl iroh::protocol::ProtocolHandler for PlasmoidProtocol {
             let engine = self.engine.clone();
             let remote_node_id = remote_node_id.clone();
             let endpoint = self.endpoint.clone();
-            let distributed = self.distributed.clone();
+            let doc_registry = self.doc_registry.clone();
 
             tokio::spawn(async move {
                 if let Err(e) = handle_stream(
@@ -66,7 +67,7 @@ impl iroh::protocol::ProtocolHandler for PlasmoidProtocol {
                     engine,
                     remote_node_id,
                     endpoint,
-                    distributed,
+                    doc_registry,
                 )
                 .await
                 {
@@ -86,7 +87,7 @@ async fn handle_stream(
     engine: Engine,
     remote_node_id: String,
     endpoint: Endpoint,
-    distributed: Option<Arc<DistributedRegistry>>,
+    doc_registry: Option<Arc<DocRegistry>>,
 ) -> anyhow::Result<()> {
     let request_bytes = recv.read_to_end(1024 * 1024).await?;
     let request: Request = deserialize(&request_bytes)?;
@@ -108,9 +109,18 @@ async fn handle_stream(
     let process = match process {
         Some(p) => p,
         None => {
-            // If we have a distributed registry, check for remote processes
-            // and forward the call. For now, return an error since the request
-            // was sent to this specific node.
+            // Check doc registry for remote processes and forward
+            if let Some(ref doc_reg) = doc_registry {
+                let resolved = match &request.target {
+                    Target::Name(name) => doc_reg.resolve_name(name).await,
+                    Target::Pid(pid) => doc_reg.resolve_pid(pid).await,
+                };
+
+                if let Some(ResolvedProcess::Remote(remote)) = resolved {
+                    return forward_to_remote(&endpoint, &remote, &request, send).await;
+                }
+            }
+
             let response = Response {
                 id: request.id,
                 result: Err(format!("no process found for target {:?}", request.target)),
@@ -142,7 +152,7 @@ async fn handle_stream(
             &args,
             Some(&endpoint),
             Some(registry),
-            distributed,
+            doc_registry,
         )
     })
     .await?;
@@ -161,6 +171,53 @@ async fn handle_stream(
     let response_bytes = serialize(&response)?;
     send.write_all(&response_bytes).await?;
     send.finish()?;
+
+    Ok(())
+}
+
+/// Forward a request to a remote node and relay the response back.
+async fn forward_to_remote(
+    endpoint: &Endpoint,
+    remote: &crate::doc_registry::RemoteProcess,
+    request: &Request,
+    mut send: iroh::endpoint::SendStream,
+) -> anyhow::Result<()> {
+    tracing::debug!(
+        target = ?request.target,
+        node = %remote.node.fmt_short(),
+        "Forwarding request to remote node"
+    );
+
+    let result = async {
+        let conn = endpoint
+            .connect(remote.addr.clone(), PLASMOID_ALPN)
+            .await?;
+        let (mut remote_send, mut remote_recv) = conn.open_bi().await?;
+
+        let request_bytes = wire::serialize(request)?;
+        remote_send.write_all(&request_bytes).await?;
+        remote_send.finish()?;
+
+        let response_bytes = remote_recv.read_to_end(1024 * 1024).await?;
+        Ok::<_, anyhow::Error>(response_bytes)
+    }
+    .await;
+
+    match result {
+        Ok(response_bytes) => {
+            send.write_all(&response_bytes).await?;
+            send.finish()?;
+        }
+        Err(e) => {
+            let response = Response {
+                id: request.id,
+                result: Err(format!("forwarding failed: {}", e)),
+            };
+            let response_bytes = serialize(&response)?;
+            send.write_all(&response_bytes).await?;
+            send.finish()?;
+        }
+    }
 
     Ok(())
 }

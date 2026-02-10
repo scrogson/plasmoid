@@ -3,7 +3,7 @@
 //! This module handles instantiating WASM components and invoking their
 //! exported functions with dynamic dispatch using wasm-wave typed values.
 
-use crate::gossip::{DistributedRegistry, ResolvedProcess};
+use crate::doc_registry::{DocRegistry, ResolvedProcess};
 use crate::host::{log_message, HostState, LogLevel};
 use crate::pid::Pid;
 use crate::policy::PolicySet;
@@ -29,7 +29,7 @@ pub fn invoke_actor(
     args: &[String],
     endpoint: Option<&Endpoint>,
     registry: Option<Arc<ProcessRegistry>>,
-    distributed: Option<Arc<DistributedRegistry>>,
+    doc_registry: Option<Arc<DocRegistry>>,
 ) -> Result<Vec<String>> {
     // Create host state for this invocation
     let mut state = HostState::new(actor_id.to_string(), capabilities.clone());
@@ -39,7 +39,7 @@ pub fn invoke_actor(
     state.set_endpoint(endpoint.cloned());
     state.set_engine(Some(engine.clone()));
     state.set_registry(registry);
-    state.set_distributed(distributed);
+    state.set_doc_registry(doc_registry);
 
     // Create a store for this invocation
     let mut store = wasmtime::Store::new(engine, state);
@@ -252,11 +252,11 @@ fn add_host_functions(linker: &mut Linker<HostState>, capabilities: &PolicySet) 
             },
         )?;
 
-        // spawn: func(behavior: string, name: option<string>) -> result<string, string>
+        // spawn: func(component: string, name: option<string>) -> result<string, string>
         context.func_wrap(
             "spawn",
             |caller: wasmtime::StoreContextMut<'_, HostState>,
-             (behavior, name): (String, Option<String>)|
+             (component, name): (String, Option<String>)|
              -> Result<(Result<String, String>,), _> {
                 let registry = match caller.data().registry() {
                     Some(r) => r.clone(),
@@ -267,7 +267,7 @@ fn add_host_functions(linker: &mut Linker<HostState>, capabilities: &PolicySet) 
 
                 let rt = tokio::runtime::Handle::current();
                 let result = rt.block_on(async {
-                    registry.spawn(&behavior, name.as_deref(), None).await
+                    registry.spawn(&component, name.as_deref(), None).await
                 });
 
                 match result {
@@ -295,14 +295,14 @@ fn add_host_functions(linker: &mut Linker<HostState>, capabilities: &PolicySet) 
                 };
 
                 let registry = caller.data().registry().cloned();
-                let distributed = caller.data().distributed().cloned();
+                let doc_registry = caller.data().doc_registry().cloned();
                 let endpoint = caller.data().endpoint().cloned();
                 let caller_id = caller.data().actor_id().to_string();
 
                 let result = dispatch_call(
                     &engine,
                     registry.as_ref(),
-                    distributed.as_ref(),
+                    doc_registry.as_ref(),
                     endpoint.as_ref(),
                     &caller_id,
                     &target,
@@ -335,14 +335,14 @@ fn add_host_functions(linker: &mut Linker<HostState>, capabilities: &PolicySet) 
                 };
 
                 let registry = caller.data().registry().cloned();
-                let distributed = caller.data().distributed().cloned();
+                let doc_registry = caller.data().doc_registry().cloned();
                 let endpoint = caller.data().endpoint().cloned();
                 let caller_id = caller.data().actor_id().to_string();
 
                 let result = dispatch_call(
                     &engine,
                     registry.as_ref(),
-                    distributed.as_ref(),
+                    doc_registry.as_ref(),
                     endpoint.as_ref(),
                     &caller_id,
                     &target,
@@ -364,13 +364,13 @@ fn add_host_functions(linker: &mut Linker<HostState>, capabilities: &PolicySet) 
 /// Dispatch a call: resolve the target locally or remotely.
 ///
 /// 1. Check local registry by name
-/// 2. If distributed registry exists, check for remote processes
+/// 2. If doc registry exists, check for remote processes
 /// 3. Local -> direct WASM invocation
 /// 4. Remote -> QUIC call to remote node
 fn dispatch_call(
     engine: &Engine,
     registry: Option<&Arc<ProcessRegistry>>,
-    distributed: Option<&Arc<DistributedRegistry>>,
+    doc_registry: Option<&Arc<DocRegistry>>,
     endpoint: Option<&Endpoint>,
     caller_id: &str,
     target: &str,
@@ -400,9 +400,9 @@ fn dispatch_call(
         }
     }
 
-    // Try distributed resolution
-    if let Some(distributed) = distributed {
-        if let Some(resolved) = rt.block_on(distributed.resolve_name(target)) {
+    // Try doc registry resolution
+    if let Some(doc_registry) = doc_registry {
+        if let Some(resolved) = rt.block_on(doc_registry.resolve_name(target)) {
             match resolved {
                 ResolvedProcess::Local(pid) => {
                     // Shouldn't happen (we checked local first), but handle it
@@ -445,7 +445,7 @@ fn dispatch_call(
 /// Perform a remote actor call via QUIC.
 fn remote_actor_call(
     endpoint: &Endpoint,
-    remote: &crate::gossip::RemoteProcess,
+    remote: &crate::doc_registry::RemoteProcess,
     target: &str,
     function: &str,
     args: &[String],

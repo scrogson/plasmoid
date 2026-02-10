@@ -7,6 +7,8 @@ edition = "2024"
 # Networking
 iroh = "0.96"
 iroh-gossip = "0.96"
+iroh-docs = "0.96"
+iroh-blobs = "0.98"
 
 # Encoding
 hex = "0.4"

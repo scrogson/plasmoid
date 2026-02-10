@@ -1,4 +1,4 @@
-use crate::gossip::DistributedRegistry;
+use crate::doc_registry::DocRegistry;
 use crate::pid::{Pid, PidGenerator};
 use crate::policy::PolicySet;
 use crate::protocol::PlasmoidProtocol;
@@ -6,6 +6,11 @@ use crate::registry::ProcessRegistry;
 use anyhow::Result;
 use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, EndpointId};
+use iroh_blobs::store::mem::MemStore;
+use iroh_blobs::BlobsProtocol;
+use iroh_blobs::protocol::ALPN as BLOBS_ALPN;
+use iroh_docs::net::ALPN as DOCS_ALPN;
+use iroh_docs::protocol::Docs;
 use iroh_gossip::net::{Gossip, GOSSIP_ALPN};
 use std::sync::Arc;
 use wasmtime::{Config, Engine};
@@ -19,7 +24,7 @@ pub struct ActorRuntime {
     endpoint: Endpoint,
     engine: Engine,
     registry: Arc<ProcessRegistry>,
-    distributed: Arc<DistributedRegistry>,
+    doc_registry: Arc<DocRegistry>,
 }
 
 impl ActorRuntime {
@@ -36,26 +41,38 @@ impl ActorRuntime {
         let pid_gen = PidGenerator::new(endpoint.id());
         let registry = Arc::new(ProcessRegistry::new(pid_gen, engine.clone()));
 
-        // Create gossip instance
+        // Create blob store (in-memory)
+        let blobs = MemStore::new();
+
+        // Create gossip instance (used by iroh-docs internally for sync)
         let gossip = Gossip::builder().spawn(endpoint.clone());
 
-        // Create distributed registry
-        let distributed = DistributedRegistry::new(
+        // Create docs protocol backed by blobs and gossip
+        let docs = Docs::memory()
+            .spawn(endpoint.clone(), blobs.clone().into(), gossip.clone())
+            .await?;
+
+        // Create doc-backed distributed registry
+        let doc_registry = DocRegistry::new(
             registry.clone(),
             endpoint.clone(),
-            gossip.clone(),
-        );
+            docs.clone(),
+            blobs.clone(),
+        )
+        .await?;
 
         let protocol = PlasmoidProtocol::new(
             registry.clone(),
             engine.clone(),
             endpoint.clone(),
-            Some(distributed.clone()),
+            Some(doc_registry.clone()),
         );
 
         let router = Router::builder(endpoint.clone())
             .accept(PLASMOID_ALPN, protocol)
             .accept(GOSSIP_ALPN, gossip)
+            .accept(BLOBS_ALPN, BlobsProtocol::new(&blobs, None))
+            .accept(DOCS_ALPN, docs)
             .spawn();
 
         tracing::info!(endpoint_id = %endpoint.id(), "Actor runtime initialized");
@@ -65,7 +82,7 @@ impl ActorRuntime {
             endpoint,
             engine,
             registry,
-            distributed,
+            doc_registry,
         })
     }
 
@@ -94,21 +111,21 @@ impl ActorRuntime {
         &self.registry
     }
 
-    /// Get a reference to the distributed registry.
-    pub fn distributed(&self) -> &Arc<DistributedRegistry> {
-        &self.distributed
+    /// Get a reference to the doc registry.
+    pub fn doc_registry(&self) -> &Arc<DocRegistry> {
+        &self.doc_registry
     }
 
-    /// Join a gossip cluster with bootstrap peers.
+    /// Join the cluster with bootstrap peers.
     pub async fn join_cluster(&self, peers: Vec<EndpointId>) -> Result<()> {
-        self.distributed.start(&peers).await?;
-        tracing::info!(peers = peers.len(), "Joined gossip cluster");
+        self.doc_registry.start(&peers).await?;
+        tracing::info!(peers = peers.len(), "Joined cluster");
         Ok(())
     }
 
-    /// Deploy a WASM actor: register it as a behavior and spawn one process.
+    /// Deploy a WASM actor: register it as a component and spawn one process.
     ///
-    /// The `name` is used both as the behavior name and the process name.
+    /// The `name` is used both as the component name and the process name.
     /// Returns the PID of the spawned process.
     pub async fn deploy(
         &self,
@@ -117,7 +134,7 @@ impl ActorRuntime {
         capabilities: PolicySet,
     ) -> Result<Pid> {
         self.registry
-            .register_behavior(name, wasm_bytes, capabilities.clone())
+            .register_component(name, wasm_bytes, capabilities.clone())
             .await?;
 
         let pid = self
@@ -125,9 +142,9 @@ impl ActorRuntime {
             .spawn(name, Some(name), Some(capabilities))
             .await?;
 
-        // Announce to gossip cluster (best-effort)
+        // Announce to registry document (best-effort)
         if let Err(e) = self
-            .distributed
+            .doc_registry
             .announce_spawn(&pid, name, Some(name))
             .await
         {
@@ -137,19 +154,19 @@ impl ActorRuntime {
         Ok(pid)
     }
 
-    /// Spawn a new process from a registered behavior.
+    /// Spawn a new process from a registered component.
     pub async fn spawn(
         &self,
-        behavior: &str,
+        component: &str,
         name: Option<&str>,
         capabilities: Option<PolicySet>,
     ) -> Result<Pid> {
-        let pid = self.registry.spawn(behavior, name, capabilities).await?;
+        let pid = self.registry.spawn(component, name, capabilities).await?;
 
-        // Announce to gossip cluster (best-effort)
+        // Announce to registry document (best-effort)
         if let Err(e) = self
-            .distributed
-            .announce_spawn(&pid, behavior, name)
+            .doc_registry
+            .announce_spawn(&pid, component, name)
             .await
         {
             tracing::debug!(error = %e, "Failed to announce spawn (no peers yet?)");

@@ -1,4 +1,4 @@
-use crate::gossip::DistributedRegistry;
+use crate::doc_registry::DocRegistry;
 use crate::pid::Pid;
 use crate::policy::PolicySet;
 use crate::registry::ProcessRegistry;
@@ -19,7 +19,7 @@ pub struct HostState {
     endpoint: Option<Endpoint>,
     engine: Option<Engine>,
     registry: Option<Arc<ProcessRegistry>>,
-    distributed: Option<Arc<DistributedRegistry>>,
+    doc_registry: Option<Arc<DocRegistry>>,
     wasi_ctx: WasiCtx,
     resource_table: ResourceTable,
 }
@@ -56,7 +56,7 @@ impl HostState {
             endpoint: None,
             engine: None,
             registry: None,
-            distributed: None,
+            doc_registry: None,
             wasi_ctx: WasiCtxBuilder::new().build(),
             resource_table: ResourceTable::new(),
         }
@@ -126,11 +126,11 @@ impl HostState {
         self.registry = registry;
     }
 
-    pub fn distributed(&self) -> Option<&Arc<DistributedRegistry>> {
-        self.distributed.as_ref()
+    pub fn doc_registry(&self) -> Option<&Arc<DocRegistry>> {
+        self.doc_registry.as_ref()
     }
 
-    pub fn set_distributed(&mut self, distributed: Option<Arc<DistributedRegistry>>) {
-        self.distributed = distributed;
+    pub fn set_doc_registry(&mut self, doc_registry: Option<Arc<DocRegistry>>) {
+        self.doc_registry = doc_registry;
     }
 }
