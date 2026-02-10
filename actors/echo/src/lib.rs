@@ -1,21 +1,27 @@
-wit_bindgen::generate!({
-    world: "actor",
-    path: "../../wit",
-});
+#[allow(warnings)]
+mod bindings;
+
+use bindings::exports::plasmoid::echo::echo::Guest;
+use bindings::plasmoid::runtime::logging;
 
 struct EchoActor;
 
-impl exports::plasmoid::actor::handler::Guest for EchoActor {
-    fn handle(request: Vec<u8>) -> Result<Vec<u8>, String> {
-        // Log the request
-        plasmoid::actor::logging::log(
-            plasmoid::actor::logging::Level::Info,
-            &format!("Echo actor received {} bytes", request.len()),
+impl Guest for EchoActor {
+    fn echo(message: String) -> String {
+        logging::log(
+            logging::Level::Info,
+            &format!("Echo: {}", message),
         );
+        message
+    }
 
-        // Echo back the request
-        Ok(request)
+    fn reverse(message: String) -> String {
+        logging::log(
+            logging::Level::Info,
+            &format!("Reverse: {}", message),
+        );
+        message.chars().rev().collect()
     }
 }
 
-export!(EchoActor);
+bindings::export!(EchoActor with_types_in bindings);
