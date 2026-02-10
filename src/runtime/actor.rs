@@ -19,6 +19,14 @@ impl WasmActor {
         })
     }
 
+    /// Create a WASM actor from an already-compiled component.
+    pub fn from_component(component: Component, capabilities: PolicySet) -> Self {
+        Self {
+            component,
+            capabilities,
+        }
+    }
+
     /// Get the compiled component.
     pub fn component(&self) -> &Component {
         &self.component

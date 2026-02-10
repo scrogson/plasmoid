@@ -1,5 +1,5 @@
 use anyhow::{bail, Result};
-use iroh::EndpointAddr;
+use iroh::EndpointId;
 use plasmoid::client::ActorRef;
 use plasmoid::policy::PolicySet;
 use plasmoid::ActorRuntime;
@@ -7,17 +7,21 @@ use tracing_subscriber::EnvFilter;
 
 const USAGE: &str = "\
 Usage:
-  plasmoid run <wasm-file> <alpn>
-      Start the runtime with an actor deployed.
+  plasmoid run [--peer <node-id>] <wasm-file> <name> [<wasm-file> <name>...]
+      Start the runtime with one or more actors deployed.
+      --peer connects to an existing node for gossip clustering.
 
-  plasmoid call <node-addr-json> <alpn> <function> [args...]
+  plasmoid call <node-id> <name> <function> [args...]
       Call a function on a remote actor.
-      <node-addr-json> is the JSON printed by 'plasmoid run'.
+      <node-id> is the hex endpoint ID printed by 'plasmoid run'.
       Arguments are wasm-wave encoded (strings need quotes: '\"hello\"').
 
 Examples:
-  plasmoid run actors/echo/target/wasm32-wasip1/release/echo_actor.wasm echo/1
-  plasmoid call '{...}' echo/1 echo '\"hello world\"'
+  plasmoid run echo_actor.wasm echo
+  plasmoid run echo_actor.wasm echo caller_actor.wasm caller
+  plasmoid run --peer a3f7bc1234567890... echo_actor.wasm echo
+  plasmoid call a3f7bc1234567890... echo echo '\"hello world\"'
+  plasmoid call a3f7bc1234567890... caller call-echo '\"hello\"'
 ";
 
 #[tokio::main]
@@ -36,8 +40,20 @@ async fn main() -> Result<()> {
 }
 
 async fn cmd_run(args: &[String]) -> Result<()> {
-    if args.len() < 2 {
-        bail!("usage: plasmoid run <wasm-file> <alpn>");
+    // Parse --peer flag
+    let mut peers: Vec<EndpointId> = Vec::new();
+    let mut remaining = args;
+
+    while remaining.len() >= 2 && remaining[0] == "--peer" {
+        let peer_id: EndpointId = remaining[1]
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid peer node ID '{}': {}", remaining[1], e))?;
+        peers.push(peer_id);
+        remaining = &remaining[2..];
+    }
+
+    if remaining.len() < 2 || remaining.len() % 2 != 0 {
+        bail!("usage: plasmoid run [--peer <node-id>] <wasm-file> <name> [<wasm-file> <name>...]");
     }
 
     tracing_subscriber::fmt()
@@ -47,26 +63,35 @@ async fn cmd_run(args: &[String]) -> Result<()> {
         )
         .init();
 
-    let wasm_path = &args[0];
-    let alpn = &args[1];
-
-    tracing::info!("Plasmoid Actor Runtime v{}", env!("CARGO_PKG_VERSION"));
+    eprintln!("Plasmoid v{}", env!("CARGO_PKG_VERSION"));
+    eprintln!();
 
     let runtime = ActorRuntime::new().await?;
 
-    tracing::info!(node_id = %runtime.node_id(), "Node identity");
-
-    let wasm_bytes = std::fs::read(wasm_path)?;
-    runtime
-        .deploy(alpn.as_bytes().to_vec(), &wasm_bytes, PolicySet::all())
-        .await?;
-
-    // Print the node address as JSON so the client can connect
-    let addr = runtime.node_addr();
-    let addr_json = serde_json::to_string(&addr)?;
+    eprintln!("Node: {}", runtime.node_id());
     eprintln!();
-    eprintln!("  Node address (pass to 'plasmoid call'):");
-    eprintln!("  {addr_json}");
+
+    // Join gossip cluster if peers specified
+    if !peers.is_empty() {
+        runtime.join_cluster(peers).await?;
+    }
+
+    // Deploy actors in pairs: <wasm-file> <name>
+    let mut pids = Vec::new();
+    for pair in remaining.chunks(2) {
+        let wasm_path = &pair[0];
+        let name = &pair[1];
+
+        let wasm_bytes = std::fs::read(wasm_path)?;
+        let pid = runtime.deploy(name, &wasm_bytes, PolicySet::all()).await?;
+        pids.push((pid, name.clone()));
+    }
+
+    // Print process table
+    eprintln!("Processes:");
+    for (pid, name) in &pids {
+        eprintln!("  {pid}  {name}");
+    }
     eprintln!();
 
     runtime.run().await?;
@@ -76,16 +101,18 @@ async fn cmd_run(args: &[String]) -> Result<()> {
 
 async fn cmd_call(args: &[String]) -> Result<()> {
     if args.len() < 3 {
-        bail!("usage: plasmoid call <node-addr-json> <alpn> <function> [args...]");
+        bail!("usage: plasmoid call <node-id> <name> <function> [args...]");
     }
 
-    let addr: EndpointAddr = serde_json::from_str(&args[0])?;
-    let alpn = &args[1];
+    let node_id: EndpointId = args[0]
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid node ID '{}': {}", args[0], e))?;
+    let name = &args[1];
     let function = &args[2];
     let call_args: Vec<&str> = args[3..].iter().map(|s| s.as_str()).collect();
 
     let endpoint = iroh::Endpoint::builder().bind().await?;
-    let actor = ActorRef::remote(endpoint, alpn, addr);
+    let actor = ActorRef::remote_by_name(endpoint, name, node_id);
 
     let results = actor.call(function, &call_args).await?;
 

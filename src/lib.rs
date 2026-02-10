@@ -1,7 +1,13 @@
 pub mod client;
+pub mod gossip;
 pub mod host;
+pub mod pid;
 pub mod policy;
+pub mod protocol;
+pub mod registry;
 pub mod runtime;
 pub mod wire;
 
-pub use runtime::ActorRuntime;
+pub use pid::Pid;
+pub use registry::ProcessRegistry;
+pub use runtime::{ActorRuntime, PLASMOID_ALPN};

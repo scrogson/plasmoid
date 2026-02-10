@@ -1,4 +1,29 @@
+[env]
+_.path = ["./target/debug"]
+
 [tools]
 rust = "stable"
 "cargo:cargo-component" = "latest"
 "cargo:wasm-tools" = "latest"
+
+[tasks.build]
+description = "Build plasmoid"
+run = "cargo build"
+
+[tasks."build:release"]
+description = "Build plasmoid (release)"
+run = "cargo build --release"
+
+[tasks."build:echo"]
+description = "Build the echo actor WASM component"
+dir = "actors/echo"
+run = "cargo component build --release"
+
+[tasks."build:caller"]
+description = "Build the caller actor WASM component"
+dir = "actors/caller"
+run = "cargo component build --release"
+
+[tasks."build:actors"]
+description = "Build all actor WASM components"
+depends = ["build:echo", "build:caller"]

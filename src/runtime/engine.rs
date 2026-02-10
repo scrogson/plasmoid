@@ -1,17 +1,25 @@
+use crate::gossip::DistributedRegistry;
+use crate::pid::{Pid, PidGenerator};
 use crate::policy::PolicySet;
-use crate::runtime::{accept, WasmActor};
+use crate::protocol::PlasmoidProtocol;
+use crate::registry::ProcessRegistry;
 use anyhow::Result;
+use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, EndpointId};
-use std::collections::HashMap;
+use iroh_gossip::net::{Gossip, GOSSIP_ALPN};
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use wasmtime::{Config, Engine};
+
+/// The single ALPN used for all plasmoid traffic.
+pub const PLASMOID_ALPN: &[u8] = b"plasmoid/1";
 
 /// The actor runtime - hosts WASM actors on an iroh endpoint.
 pub struct ActorRuntime {
+    router: Router,
     endpoint: Endpoint,
     engine: Engine,
-    actors: Arc<RwLock<HashMap<Vec<u8>, WasmActor>>>,
+    registry: Arc<ProcessRegistry>,
+    distributed: Arc<DistributedRegistry>,
 }
 
 impl ActorRuntime {
@@ -25,12 +33,39 @@ impl ActorRuntime {
         // Configure iroh endpoint with default settings
         let endpoint = Endpoint::builder().bind().await?;
 
+        let pid_gen = PidGenerator::new(endpoint.id());
+        let registry = Arc::new(ProcessRegistry::new(pid_gen, engine.clone()));
+
+        // Create gossip instance
+        let gossip = Gossip::builder().spawn(endpoint.clone());
+
+        // Create distributed registry
+        let distributed = DistributedRegistry::new(
+            registry.clone(),
+            endpoint.clone(),
+            gossip.clone(),
+        );
+
+        let protocol = PlasmoidProtocol::new(
+            registry.clone(),
+            engine.clone(),
+            endpoint.clone(),
+            Some(distributed.clone()),
+        );
+
+        let router = Router::builder(endpoint.clone())
+            .accept(PLASMOID_ALPN, protocol)
+            .accept(GOSSIP_ALPN, gossip)
+            .spawn();
+
         tracing::info!(endpoint_id = %endpoint.id(), "Actor runtime initialized");
 
         Ok(Self {
+            router,
             endpoint,
             engine,
-            actors: Arc::new(RwLock::new(HashMap::new())),
+            registry,
+            distributed,
         })
     }
 
@@ -54,53 +89,88 @@ impl ActorRuntime {
         &self.engine
     }
 
-    /// Deploy a WASM actor with the given ALPN and capabilities.
-    pub async fn deploy(
-        &self,
-        alpn: Vec<u8>,
-        wasm_bytes: &[u8],
-        capabilities: PolicySet,
-    ) -> Result<()> {
-        let actor = WasmActor::new(&self.engine, wasm_bytes, capabilities)?;
-        let mut actors_guard = self.actors.write().await;
-        actors_guard.insert(alpn.clone(), actor);
+    /// Get a reference to the process registry.
+    pub fn registry(&self) -> &Arc<ProcessRegistry> {
+        &self.registry
+    }
 
-        // Update the endpoint's ALPN list so TLS handshakes succeed
-        let alpns: Vec<Vec<u8>> = actors_guard.keys().cloned().collect();
-        self.endpoint.set_alpns(alpns);
+    /// Get a reference to the distributed registry.
+    pub fn distributed(&self) -> &Arc<DistributedRegistry> {
+        &self.distributed
+    }
 
-        tracing::info!(alpn = ?String::from_utf8_lossy(&alpn), "Actor deployed");
+    /// Join a gossip cluster with bootstrap peers.
+    pub async fn join_cluster(&self, peers: Vec<EndpointId>) -> Result<()> {
+        self.distributed.start(&peers).await?;
+        tracing::info!(peers = peers.len(), "Joined gossip cluster");
         Ok(())
     }
 
-    /// Check if an actor is deployed for the given ALPN.
-    pub async fn has_actor(&self, alpn: &[u8]) -> bool {
-        self.actors.read().await.contains_key(alpn)
-    }
+    /// Deploy a WASM actor: register it as a behavior and spawn one process.
+    ///
+    /// The `name` is used both as the behavior name and the process name.
+    /// Returns the PID of the spawned process.
+    pub async fn deploy(
+        &self,
+        name: &str,
+        wasm_bytes: &[u8],
+        capabilities: PolicySet,
+    ) -> Result<Pid> {
+        self.registry
+            .register_behavior(name, wasm_bytes, capabilities.clone())
+            .await?;
 
-    /// Run the accept loop.
-    pub async fn run(&self) -> Result<()> {
-        tracing::info!(node_id = %self.node_id(), "Actor runtime accepting connections");
+        let pid = self
+            .registry
+            .spawn(name, Some(name), Some(capabilities))
+            .await?;
 
-        loop {
-            tokio::select! {
-                Some(incoming) = self.endpoint.accept() => {
-                    let actors = self.actors.clone();
-                    let engine = self.engine.clone();
-                    let endpoint = self.endpoint.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = accept::handle_incoming(incoming, actors, engine, endpoint).await {
-                            tracing::error!(error = %e, "Failed to handle incoming connection");
-                        }
-                    });
-                }
-                _ = tokio::signal::ctrl_c() => {
-                    tracing::info!("Shutting down");
-                    break;
-                }
-            }
+        // Announce to gossip cluster (best-effort)
+        if let Err(e) = self
+            .distributed
+            .announce_spawn(&pid, name, Some(name))
+            .await
+        {
+            tracing::debug!(error = %e, "Failed to announce spawn (no peers yet?)");
         }
 
+        Ok(pid)
+    }
+
+    /// Spawn a new process from a registered behavior.
+    pub async fn spawn(
+        &self,
+        behavior: &str,
+        name: Option<&str>,
+        capabilities: Option<PolicySet>,
+    ) -> Result<Pid> {
+        let pid = self.registry.spawn(behavior, name, capabilities).await?;
+
+        // Announce to gossip cluster (best-effort)
+        if let Err(e) = self
+            .distributed
+            .announce_spawn(&pid, behavior, name)
+            .await
+        {
+            tracing::debug!(error = %e, "Failed to announce spawn (no peers yet?)");
+        }
+
+        Ok(pid)
+    }
+
+    /// Check if a process with the given name exists.
+    pub async fn has_process(&self, name: &str) -> bool {
+        self.registry.get_by_name(name).await.is_some()
+    }
+
+    /// Wait for shutdown (ctrl+c). The Router handles accept in the background.
+    pub async fn run(&self) -> Result<()> {
+        tracing::info!(node_id = %self.node_id(), "Actor runtime running");
+
+        tokio::signal::ctrl_c().await?;
+        tracing::info!("Shutting down");
+
+        self.router.shutdown().await?;
         Ok(())
     }
 }

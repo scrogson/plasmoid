@@ -6,6 +6,13 @@ edition = "2024"
 [dependencies]
 # Networking
 iroh = "0.96"
+iroh-gossip = "0.96"
+
+# Encoding
+hex = "0.4"
+blake3 = "1"
+bytes = "1"
+futures-lite = "2"
 
 # WASM Runtime
 wasmtime = { version = "41", features = ["component-model", "wave"] }
@@ -33,3 +40,4 @@ thiserror = "2"
 
 [dev-dependencies]
 tempfile = "3"
+rand = "0.9"

@@ -2,59 +2,45 @@ use anyhow::{Context, Result};
 use iroh::{Endpoint, EndpointAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::wire::{self, Request, Response};
-
-/// Target for an actor reference - either local (same runtime) or remote.
-enum Target {
-    /// Local actor on the same endpoint.
-    Local,
-    /// Remote actor at a known address.
-    Remote(EndpointAddr),
-}
+use crate::runtime::PLASMOID_ALPN;
+use crate::wire::{self, Request, Response, Target};
 
 /// A typed reference to an actor, enabling function calls over QUIC.
 ///
-/// `ActorRef` abstracts over local and remote actors, providing a uniform
-/// `call`/`notify` API. Both local and remote calls go through QUIC, ensuring
-/// identical behavior regardless of actor location.
+/// `ActorRef` targets actors by name (or PID). All connections use the
+/// single `PLASMOID_ALPN` protocol, with target addressing in the request.
 pub struct ActorRef {
     endpoint: Endpoint,
-    alpn: Vec<u8>,
-    target: Target,
+    target: ActorTarget,
     next_id: AtomicU64,
 }
 
-impl ActorRef {
-    /// Create a reference to a local actor on the given runtime.
-    pub fn local(runtime: &crate::ActorRuntime, alpn: &str) -> Self {
-        Self {
-            endpoint: runtime.endpoint().clone(),
-            alpn: alpn.as_bytes().to_vec(),
-            target: Target::Local,
-            next_id: AtomicU64::new(1),
-        }
-    }
+enum ActorTarget {
+    /// Remote actor at a known address.
+    Remote {
+        addr: EndpointAddr,
+        name: String,
+    },
+}
 
-    /// Create a reference to a remote actor at the given endpoint address.
-    pub fn remote(endpoint: Endpoint, alpn: &str, addr: impl Into<EndpointAddr>) -> Self {
+impl ActorRef {
+    /// Create a reference to a remote actor by name at the given endpoint address.
+    pub fn remote_by_name(
+        endpoint: Endpoint,
+        name: &str,
+        addr: impl Into<EndpointAddr>,
+    ) -> Self {
         Self {
             endpoint,
-            alpn: alpn.as_bytes().to_vec(),
-            target: Target::Remote(addr.into()),
+            target: ActorTarget::Remote {
+                addr: addr.into(),
+                name: name.to_string(),
+            },
             next_id: AtomicU64::new(1),
         }
-    }
-
-    /// Get the ALPN protocol identifier for this actor.
-    pub fn alpn(&self) -> &[u8] {
-        &self.alpn
     }
 
     /// Call a function on the actor and return the results.
-    ///
-    /// Opens a QUIC bidirectional stream, sends a serialized `Request`,
-    /// and reads back the `Response`. Returns the result values as
-    /// wasm-wave encoded strings.
     pub async fn call(&self, function: &str, args: &[&str]) -> Result<Vec<String>> {
         let response = self.send_request(function, args).await?;
 
@@ -64,8 +50,6 @@ impl ActorRef {
     }
 
     /// Send a notification to the actor (fire-and-forget).
-    ///
-    /// Sends the request and discards the response.
     pub async fn notify(&self, function: &str, args: &[&str]) -> Result<()> {
         let _ = self.send_request(function, args).await?;
         Ok(())
@@ -75,8 +59,15 @@ impl ActorRef {
     async fn send_request(&self, function: &str, args: &[&str]) -> Result<Response> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
 
+        let (addr, wire_target) = match &self.target {
+            ActorTarget::Remote { addr, name } => {
+                (addr.clone(), Target::Name(name.clone()))
+            }
+        };
+
         let request = Request {
             id,
+            target: wire_target,
             function: function.to_string(),
             args: args.iter().map(|s| s.to_string()).collect(),
         };
@@ -84,14 +75,9 @@ impl ActorRef {
         let request_bytes =
             wire::serialize(&request).context("failed to serialize request")?;
 
-        let addr: EndpointAddr = match &self.target {
-            Target::Local => self.endpoint.id().into(),
-            Target::Remote(addr) => addr.clone(),
-        };
-
         let conn = self
             .endpoint
-            .connect(addr, &self.alpn)
+            .connect(addr, PLASMOID_ALPN)
             .await
             .context("failed to connect to actor")?;
 

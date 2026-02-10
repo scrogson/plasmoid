@@ -11,6 +11,6 @@ interface echo {
 world echo-actor {
     export echo;
 
-    import plasmoid:runtime/logging@0.1.0;
-    import plasmoid:runtime/actor-context@0.1.0;
+    import plasmoid:runtime/logging@0.2.0;
+    import plasmoid:runtime/actor-context@0.2.0;
 }

@@ -1,9 +1,10 @@
-use plasmoid::wire::{Request, Response, serialize, deserialize};
+use plasmoid::wire::{Request, Response, Target, serialize, deserialize};
 
 #[test]
 fn test_roundtrip_request() {
     let req = Request {
         id: 1,
+        target: Target::Name("echo".to_string()),
         function: "echo".to_string(),
         args: vec!["\"hello world\"".to_string()],
     };

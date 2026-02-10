@@ -1,0 +1,12 @@
+package plasmoid:caller@0.1.0;
+
+interface caller {
+    call-echo: func(message: string) -> result<string, string>;
+}
+
+world caller-actor {
+    export caller;
+
+    import plasmoid:runtime/logging@0.2.0;
+    import plasmoid:runtime/actor-context@0.2.0;
+}

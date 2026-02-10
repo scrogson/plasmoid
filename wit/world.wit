@@ -1,4 +1,4 @@
-package plasmoid:runtime@0.1.0;
+package plasmoid:runtime@0.2.0;
 
 interface logging {
     enum level {
@@ -13,19 +13,26 @@ interface logging {
 }
 
 interface actor-context {
-    /// Get this actor's identity
-    self-id: func() -> string;
+    /// Get this process's PID (e.g. "<a3f7bc12.1>")
+    self-pid: func() -> string;
 
-    /// Get the caller's identity (if known)
-    remote-id: func() -> option<string>;
+    /// Get this process's registered name, if any
+    self-name: func() -> option<string>;
 
-    /// Call a function on another actor and await the response.
-    /// alpn: the target actor's ALPN identifier
+    /// Get the caller's PID, if known
+    caller-pid: func() -> option<string>;
+
+    /// Call a function on another process by name or PID and await the response.
+    /// target: the name or PID string of the target process
     /// function: the function name to call
     /// args: wasm-wave encoded arguments
     /// Returns wasm-wave encoded results
-    call: func(alpn: string, function: string, args: list<string>) -> result<list<string>, string>;
+    call: func(target: string, function: string, args: list<string>) -> result<list<string>, string>;
 
-    /// Send a message to another actor with no response.
-    notify: func(alpn: string, function: string, args: list<string>) -> result<_, string>;
+    /// Send a message to another process with no response.
+    notify: func(target: string, function: string, args: list<string>) -> result<_, string>;
+
+    /// Spawn a new process from a registered behavior.
+    /// Returns the PID of the new process.
+    spawn: func(behavior: string, name: option<string>) -> result<string, string>;
 }

@@ -1,11 +1,22 @@
+use crate::pid::Pid;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+/// How to address the target process.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Target {
+    /// Address by PID.
+    Pid(Pid),
+    /// Address by registered name.
+    Name(String),
+}
 
 /// A request to call a function on an actor.
 /// Arguments are wasm-wave encoded strings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Request {
     pub id: u64,
+    pub target: Target,
     pub function: String,
     pub args: Vec<String>,
 }
