@@ -3,6 +3,7 @@ use crate::runtime::WasmActor;
 use crate::wire::{deserialize, serialize, Request, Response};
 use anyhow::Result;
 use iroh::endpoint::Incoming;
+use iroh::Endpoint;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -13,6 +14,7 @@ pub async fn handle_incoming(
     incoming: Incoming,
     actors: Arc<RwLock<HashMap<Vec<u8>, WasmActor>>>,
     engine: Engine,
+    endpoint: Endpoint,
 ) -> Result<()> {
     // Accept the incoming connection and get the connecting state
     let mut connecting = incoming.accept()?;
@@ -55,10 +57,11 @@ pub async fn handle_incoming(
         let alpn = alpn.clone();
         let engine = engine.clone();
         let remote_node_id = remote_node_id.clone();
+        let endpoint = endpoint.clone();
 
         tokio::spawn(async move {
             if let Err(e) =
-                handle_stream(stream, &alpn, actors, engine, remote_node_id).await
+                handle_stream(stream, &alpn, actors, engine, remote_node_id, endpoint).await
             {
                 tracing::error!(error = %e, "Stream handler error");
             }
@@ -74,6 +77,7 @@ async fn handle_stream(
     actors: Arc<RwLock<HashMap<Vec<u8>, WasmActor>>>,
     engine: Engine,
     remote_node_id: String,
+    endpoint: Endpoint,
 ) -> Result<()> {
     // Read the request (1MB limit)
     let request_bytes = recv.read_to_end(1024 * 1024).await?;
@@ -110,6 +114,7 @@ async fn handle_stream(
             Some(remote),
             &function,
             &args,
+            Some(&endpoint),
         )
     })
     .await?;

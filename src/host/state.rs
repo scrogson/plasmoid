@@ -1,4 +1,5 @@
 use crate::policy::PolicySet;
+use iroh::Endpoint;
 
 /// State available to host functions during WASM execution.
 #[derive(Debug)]
@@ -6,6 +7,7 @@ pub struct HostState {
     actor_id: String,
     capabilities: PolicySet,
     remote_node_id: Option<String>,
+    endpoint: Option<Endpoint>,
 }
 
 impl HostState {
@@ -14,6 +16,7 @@ impl HostState {
             actor_id,
             capabilities,
             remote_node_id: None,
+            endpoint: None,
         }
     }
 
@@ -31,5 +34,13 @@ impl HostState {
 
     pub fn set_remote_node_id(&mut self, node_id: Option<String>) {
         self.remote_node_id = node_id;
+    }
+
+    pub fn endpoint(&self) -> Option<&Endpoint> {
+        self.endpoint.as_ref()
+    }
+
+    pub fn set_endpoint(&mut self, endpoint: Option<Endpoint>) {
+        self.endpoint = endpoint;
     }
 }

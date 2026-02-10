@@ -5,9 +5,11 @@
 
 use crate::host::{log_message, HostState, LogLevel};
 use crate::policy::PolicySet;
+use crate::wire::{deserialize, serialize, Request, Response};
 use anyhow::{anyhow, Result};
-use wasmtime::component::{Component, Linker, Type, Val};
+use iroh::Endpoint;
 use wasmtime::component::types::ComponentItem;
+use wasmtime::component::{Component, Linker, Type, Val};
 use wasmtime::Engine;
 
 /// Invoke a function on a WASM actor component.
@@ -37,10 +39,12 @@ pub fn invoke_actor(
     remote_node_id: Option<String>,
     function: &str,
     args: &[String],
+    endpoint: Option<&Endpoint>,
 ) -> Result<Vec<String>> {
     // Create host state for this invocation
     let mut state = HostState::new(actor_id.to_string(), capabilities.clone());
     state.set_remote_node_id(remote_node_id);
+    state.set_endpoint(endpoint.cloned());
 
     // Create a store for this invocation
     let mut store = wasmtime::Store::new(engine, state);
@@ -259,25 +263,106 @@ fn add_host_functions(linker: &mut Linker<HostState>, capabilities: &PolicySet) 
         // call: func(alpn: string, function: string, args: list<string>) -> result<list<string>, string>
         context.func_wrap(
             "call",
-            |_caller: wasmtime::StoreContextMut<'_, HostState>,
-             (_alpn, _function, _args): (String, String, Vec<String>)|
+            |caller: wasmtime::StoreContextMut<'_, HostState>,
+             (alpn, function, args): (String, String, Vec<String>)|
              -> Result<(Result<Vec<String>, String>,), _> {
-                // TODO: implement cross-actor calls
-                Ok((Err("actor:call not yet implemented".to_string()),))
+                if !caller.data().capabilities().allows("actor:call") {
+                    return Ok((Err("unauthorized: actor:call not permitted".to_string()),));
+                }
+
+                let endpoint = match caller.data().endpoint() {
+                    Some(ep) => ep.clone(),
+                    None => {
+                        return Ok((Err(
+                            "no endpoint available for actor-to-actor calls".to_string(),
+                        ),));
+                    }
+                };
+
+                let result = tokio::runtime::Handle::current().block_on(async {
+                    actor_call(&endpoint, &alpn, &function, &args).await
+                });
+
+                match result {
+                    Ok(results) => Ok((Ok(results),)),
+                    Err(e) => Ok((Err(e.to_string()),)),
+                }
             },
         )?;
 
         // notify: func(alpn: string, function: string, args: list<string>) -> result<_, string>
         context.func_wrap(
             "notify",
-            |_caller: wasmtime::StoreContextMut<'_, HostState>,
-             (_alpn, _function, _args): (String, String, Vec<String>)|
+            |caller: wasmtime::StoreContextMut<'_, HostState>,
+             (alpn, function, args): (String, String, Vec<String>)|
              -> Result<(Result<(), String>,), _> {
-                // TODO: implement fire-and-forget notifications
-                Ok((Err("actor:notify not yet implemented".to_string()),))
+                if !caller.data().capabilities().allows("actor:notify") {
+                    return Ok((Err("unauthorized: actor:notify not permitted".to_string()),));
+                }
+
+                let endpoint = match caller.data().endpoint() {
+                    Some(ep) => ep.clone(),
+                    None => {
+                        return Ok((Err(
+                            "no endpoint available for actor-to-actor calls".to_string(),
+                        ),));
+                    }
+                };
+
+                let result = tokio::runtime::Handle::current().block_on(async {
+                    actor_call(&endpoint, &alpn, &function, &args).await
+                });
+
+                match result {
+                    Ok(_) => Ok((Ok(()),)),
+                    Err(e) => Ok((Err(e.to_string()),)),
+                }
             },
         )?;
     }
 
     Ok(())
+}
+
+/// Perform an actor-to-actor call over QUIC.
+///
+/// Connects to the target actor (identified by ALPN) on the local endpoint,
+/// sends a serialized Request, and reads back the Response.
+async fn actor_call(
+    endpoint: &Endpoint,
+    alpn: &str,
+    function: &str,
+    args: &[String],
+) -> Result<Vec<String>> {
+    // Connect to the target actor on the local node
+    let addr = endpoint.addr();
+    let conn = endpoint
+        .connect(addr, alpn.as_bytes())
+        .await
+        .map_err(|e| anyhow!("failed to connect to actor '{}': {}", alpn, e))?;
+
+    let (mut send, mut recv) = conn
+        .open_bi()
+        .await
+        .map_err(|e| anyhow!("failed to open stream to actor '{}': {}", alpn, e))?;
+
+    // Build and send the request
+    let request = Request {
+        id: 0,
+        function: function.to_string(),
+        args: args.to_vec(),
+    };
+    let request_bytes =
+        serialize(&request).map_err(|e| anyhow!("failed to serialize request: {}", e))?;
+    send.write_all(&request_bytes).await?;
+    send.finish()?;
+
+    // Read the response
+    let response_bytes = recv.read_to_end(1024 * 1024).await?;
+    let response: Response =
+        deserialize(&response_bytes).map_err(|e| anyhow!("failed to deserialize response: {}", e))?;
+
+    response
+        .result
+        .map_err(|e| anyhow!("actor '{}' returned error: {}", alpn, e))
 }
