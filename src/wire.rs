@@ -14,7 +14,7 @@ pub enum Target {
 /// A request to call a function on an actor.
 /// Arguments are wasm-wave encoded strings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Request {
+pub struct CallRequest {
     pub id: u64,
     pub target: Target,
     pub function: String,
@@ -24,10 +24,49 @@ pub struct Request {
 /// A response from an actor function call.
 /// Results are wasm-wave encoded strings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Response {
+pub struct CallResponse {
     pub id: u64,
     pub result: Result<Vec<String>, String>,
 }
+
+/// A request to spawn a process from a registered component.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpawnRequest {
+    pub component: String,
+    pub name: Option<String>,
+}
+
+/// The result of a successful spawn.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpawnResult {
+    pub pid: Pid,
+    pub component: String,
+    pub name: Option<String>,
+}
+
+/// A response to a spawn request.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpawnResponse {
+    pub result: Result<SpawnResult, String>,
+}
+
+/// Top-level command envelope sent over the wire.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Command {
+    Call(CallRequest),
+    Spawn(SpawnRequest),
+}
+
+/// Top-level response envelope sent over the wire.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum CommandResponse {
+    Call(CallResponse),
+    Spawn(SpawnResponse),
+}
+
+/// Backward-compatible aliases.
+pub type Request = CallRequest;
+pub type Response = CallResponse;
 
 #[derive(Debug, Error)]
 pub enum WireError {

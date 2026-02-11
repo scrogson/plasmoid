@@ -5,13 +5,14 @@ use crate::protocol::PlasmoidProtocol;
 use crate::registry::ProcessRegistry;
 use anyhow::Result;
 use iroh::protocol::Router;
-use iroh::{Endpoint, EndpointAddr, EndpointId};
+use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
 use iroh_blobs::store::mem::MemStore;
 use iroh_blobs::BlobsProtocol;
 use iroh_blobs::protocol::ALPN as BLOBS_ALPN;
 use iroh_docs::net::ALPN as DOCS_ALPN;
 use iroh_docs::protocol::Docs;
 use iroh_gossip::net::{Gossip, GOSSIP_ALPN};
+use std::path::Path;
 use std::sync::Arc;
 use wasmtime::{Config, Engine};
 
@@ -27,16 +28,72 @@ pub struct ActorRuntime {
     doc_registry: Arc<DocRegistry>,
 }
 
+/// Load or generate a secret key from a data directory.
+///
+/// Persists the secret key at `<data_dir>/secret_key` and writes the
+/// public node ID to `<data_dir>/node_id` for easy scripting.
+fn load_or_generate_secret_key(data_dir: &Path) -> Result<SecretKey> {
+    let key_path = data_dir.join("secret_key");
+
+    if key_path.exists() {
+        let bytes = std::fs::read(&key_path)?;
+        let bytes: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("invalid secret key file (expected 32 bytes)"))?;
+        let key = SecretKey::from_bytes(&bytes);
+        tracing::info!(path = %key_path.display(), "Loaded secret key");
+
+        // Ensure node_id file is up to date
+        let node_id_path = data_dir.join("node_id");
+        let _ = std::fs::write(&node_id_path, key.public().to_string());
+
+        Ok(key)
+    } else {
+        std::fs::create_dir_all(data_dir)?;
+        let key = SecretKey::generate(&mut rand::rng());
+        std::fs::write(&key_path, key.to_bytes())?;
+
+        // Write public node ID for easy scripting
+        let node_id_path = data_dir.join("node_id");
+        std::fs::write(&node_id_path, key.public().to_string())?;
+
+        // Best-effort: restrict secret key permissions to owner-only on unix
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))?;
+        }
+
+        tracing::info!(path = %key_path.display(), "Generated and saved new secret key");
+        Ok(key)
+    }
+}
+
 impl ActorRuntime {
-    /// Create a new actor runtime.
-    pub async fn new() -> Result<Self> {
+    /// Create a new actor runtime with an optional data directory for persistent identity.
+    ///
+    /// If `data_dir` is provided, the node's secret key is loaded from (or saved to)
+    /// `<data_dir>/secret_key`, giving the node a stable identity across restarts.
+    /// If `None`, a random key is generated each time.
+    pub async fn new(data_dir: Option<&Path>) -> Result<Self> {
         // Configure wasmtime
         let mut config = Config::new();
         config.wasm_component_model(true);
         let engine = Engine::new(&config)?;
 
-        // Configure iroh endpoint with default settings
-        let endpoint = Endpoint::builder().bind().await?;
+        // Load or generate secret key
+        let secret_key = match data_dir {
+            Some(dir) => load_or_generate_secret_key(dir)?,
+            None => SecretKey::generate(&mut rand::rng()),
+        };
+
+        // Configure iroh endpoint with mDNS for local network discovery
+        let mdns = iroh::address_lookup::mdns::MdnsAddressLookup::builder();
+        let endpoint = Endpoint::builder()
+            .secret_key(secret_key)
+            .address_lookup(mdns)
+            .bind()
+            .await?;
 
         let pid_gen = PidGenerator::new(endpoint.id());
         let registry = Arc::new(ProcessRegistry::new(pid_gen, engine.clone()));
@@ -52,7 +109,7 @@ impl ActorRuntime {
             .spawn(endpoint.clone(), blobs.clone().into(), gossip.clone())
             .await?;
 
-        // Create doc-backed distributed registry
+        // Create doc-backed distributed registry and start event processing
         let doc_registry = DocRegistry::new(
             registry.clone(),
             endpoint.clone(),
@@ -60,6 +117,7 @@ impl ActorRuntime {
             blobs.clone(),
         )
         .await?;
+        doc_registry.start(&[]).await?;
 
         let protocol = PlasmoidProtocol::new(
             registry.clone(),
@@ -116,42 +174,45 @@ impl ActorRuntime {
         &self.doc_registry
     }
 
-    /// Join the cluster with bootstrap peers.
+    /// Add bootstrap peers to the cluster for doc sync.
     pub async fn join_cluster(&self, peers: Vec<EndpointId>) -> Result<()> {
-        self.doc_registry.start(&peers).await?;
+        self.doc_registry.add_peers(&peers).await?;
         tracing::info!(peers = peers.len(), "Joined cluster");
         Ok(())
     }
 
-    /// Deploy a WASM actor: register it as a component and spawn one process.
+    /// Load a WASM component without spawning any process.
+    pub async fn load(
+        &self,
+        component: &str,
+        wasm_bytes: &[u8],
+        capabilities: PolicySet,
+    ) -> Result<()> {
+        self.registry
+            .register_component(component, wasm_bytes, capabilities)
+            .await
+    }
+
+    /// List all registered component names.
+    pub async fn list_components(&self) -> Vec<String> {
+        self.registry.list_components().await
+    }
+
+    /// Deploy a WASM component and spawn one process from it.
     ///
-    /// The `name` is used both as the component name and the process name.
+    /// `component` is the module name (used to register the code).
+    /// `name` is an optional registered name for the spawned process.
     /// Returns the PID of the spawned process.
     pub async fn deploy(
         &self,
-        name: &str,
+        component: &str,
         wasm_bytes: &[u8],
+        name: Option<&str>,
         capabilities: PolicySet,
     ) -> Result<Pid> {
-        self.registry
-            .register_component(name, wasm_bytes, capabilities.clone())
+        self.load(component, wasm_bytes, capabilities.clone())
             .await?;
-
-        let pid = self
-            .registry
-            .spawn(name, Some(name), Some(capabilities))
-            .await?;
-
-        // Announce to registry document (best-effort)
-        if let Err(e) = self
-            .doc_registry
-            .announce_spawn(&pid, name, Some(name))
-            .await
-        {
-            tracing::debug!(error = %e, "Failed to announce spawn (no peers yet?)");
-        }
-
-        Ok(pid)
+        self.spawn(component, name, Some(capabilities)).await
     }
 
     /// Spawn a new process from a registered component.

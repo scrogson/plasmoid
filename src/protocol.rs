@@ -2,7 +2,10 @@ use crate::doc_registry::{DocRegistry, ResolvedProcess};
 use crate::registry::ProcessRegistry;
 use crate::runtime::invoke::invoke_actor;
 use crate::runtime::PLASMOID_ALPN;
-use crate::wire::{self, deserialize, serialize, Request, Response, Target};
+use crate::wire::{
+    self, deserialize, serialize, CallRequest, CallResponse, Command, CommandResponse,
+    SpawnRequest, SpawnResponse, SpawnResult, Target,
+};
 use iroh::endpoint::Connection;
 use iroh::protocol::AcceptError;
 use iroh::Endpoint;
@@ -90,11 +93,43 @@ async fn handle_stream(
     doc_registry: Option<Arc<DocRegistry>>,
 ) -> anyhow::Result<()> {
     let request_bytes = recv.read_to_end(1024 * 1024).await?;
-    let request: Request = deserialize(&request_bytes)?;
 
-    tracing::debug!(target = ?request.target, function = %request.function, "Received request");
+    let command: Command = match deserialize(&request_bytes) {
+        Ok(cmd) => cmd,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to deserialize command");
+            // Can't send a typed error response since we don't know the command type.
+            // Just close the stream cleanly.
+            send.finish()?;
+            return Ok(());
+        }
+    };
 
-    // Resolve the target — check local registry first
+    let result = match command {
+        Command::Call(request) => {
+            handle_call(request, registry, engine, remote_node_id, endpoint, doc_registry).await
+        }
+        Command::Spawn(request) => handle_spawn(request, registry, doc_registry).await,
+    };
+
+    let response_bytes = serialize(&result)?;
+    send.write_all(&response_bytes).await?;
+    send.finish()?;
+
+    Ok(())
+}
+
+async fn handle_call(
+    request: CallRequest,
+    registry: Arc<ProcessRegistry>,
+    engine: Engine,
+    remote_node_id: String,
+    endpoint: Endpoint,
+    doc_registry: Option<Arc<DocRegistry>>,
+) -> CommandResponse {
+    tracing::debug!(target = ?request.target, function = %request.function, "Received call request");
+
+    // Resolve the target -- check local registry first
     let process = match &request.target {
         Target::Pid(pid) => registry.get_by_pid(pid).await,
         Target::Name(name) => {
@@ -117,18 +152,14 @@ async fn handle_stream(
                 };
 
                 if let Some(ResolvedProcess::Remote(remote)) = resolved {
-                    return forward_to_remote(&endpoint, &remote, &request, send).await;
+                    return forward_to_remote(&endpoint, &remote, &request).await;
                 }
             }
 
-            let response = Response {
+            return CommandResponse::Call(CallResponse {
                 id: request.id,
                 result: Err(format!("no process found for target {:?}", request.target)),
-            };
-            let response_bytes = serialize(&response)?;
-            send.write_all(&response_bytes).await?;
-            send.finish()?;
-            return Ok(());
+            });
         }
     };
 
@@ -155,33 +186,61 @@ async fn handle_stream(
             doc_registry,
         )
     })
-    .await?;
+    .await;
 
-    let response = match result {
-        Ok(wave_results) => Response {
-            id: request.id,
-            result: Ok(wave_results),
-        },
-        Err(e) => Response {
-            id: request.id,
-            result: Err(e.to_string()),
-        },
+    // Flatten: JoinError (panic) or invocation error -> error response
+    let result = match result {
+        Ok(Ok(wave_results)) => Ok(wave_results),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(join_err) => Err(format!("invocation panicked: {}", join_err)),
     };
 
-    let response_bytes = serialize(&response)?;
-    send.write_all(&response_bytes).await?;
-    send.finish()?;
-
-    Ok(())
+    CommandResponse::Call(CallResponse {
+        id: request.id,
+        result,
+    })
 }
 
-/// Forward a request to a remote node and relay the response back.
+async fn handle_spawn(
+    request: SpawnRequest,
+    registry: Arc<ProcessRegistry>,
+    doc_registry: Option<Arc<DocRegistry>>,
+) -> CommandResponse {
+    tracing::debug!(component = %request.component, name = ?request.name, "Received spawn request");
+
+    let result = registry
+        .spawn(&request.component, request.name.as_deref(), None)
+        .await;
+
+    CommandResponse::Spawn(SpawnResponse {
+        result: match result {
+            Ok(pid) => {
+                // Announce to doc registry for cross-node discovery
+                if let Some(ref doc_reg) = doc_registry {
+                    if let Err(e) = doc_reg
+                        .announce_spawn(&pid, &request.component, request.name.as_deref())
+                        .await
+                    {
+                        tracing::debug!(error = %e, "Failed to announce spawn (no peers yet?)");
+                    }
+                }
+                Ok(SpawnResult {
+                    pid,
+                    component: request.component,
+                    name: request.name,
+                })
+            }
+            Err(e) => Err(e.to_string()),
+        },
+    })
+}
+
+/// Forward a request to a remote node and return the response.
 async fn forward_to_remote(
     endpoint: &Endpoint,
     remote: &crate::doc_registry::RemoteProcess,
-    request: &Request,
-    mut send: iroh::endpoint::SendStream,
-) -> anyhow::Result<()> {
+    request: &CallRequest,
+) -> CommandResponse {
     tracing::debug!(
         target = ?request.target,
         node = %remote.node.fmt_short(),
@@ -194,30 +253,22 @@ async fn forward_to_remote(
             .await?;
         let (mut remote_send, mut remote_recv) = conn.open_bi().await?;
 
-        let request_bytes = wire::serialize(request)?;
+        let command = Command::Call(request.clone());
+        let request_bytes = wire::serialize(&command)?;
         remote_send.write_all(&request_bytes).await?;
         remote_send.finish()?;
 
         let response_bytes = remote_recv.read_to_end(1024 * 1024).await?;
-        Ok::<_, anyhow::Error>(response_bytes)
+        let response: CommandResponse = wire::deserialize(&response_bytes)?;
+        Ok::<_, anyhow::Error>(response)
     }
     .await;
 
     match result {
-        Ok(response_bytes) => {
-            send.write_all(&response_bytes).await?;
-            send.finish()?;
-        }
-        Err(e) => {
-            let response = Response {
-                id: request.id,
-                result: Err(format!("forwarding failed: {}", e)),
-            };
-            let response_bytes = serialize(&response)?;
-            send.write_all(&response_bytes).await?;
-            send.finish()?;
-        }
+        Ok(response) => response,
+        Err(e) => CommandResponse::Call(CallResponse {
+            id: request.id,
+            result: Err(format!("forwarding failed: {}", e)),
+        }),
     }
-
-    Ok(())
 }

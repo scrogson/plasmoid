@@ -463,25 +463,29 @@ fn remote_actor_call(
             .await
             .map_err(|e| anyhow!("failed to open stream: {}", e))?;
 
-        let request = wire::Request {
+        let request = wire::CallRequest {
             id: 0,
             target: wire::Target::Name(target.to_string()),
             function: function.to_string(),
             args: args.to_vec(),
         };
 
-        let request_bytes = wire::serialize(&request)
-            .map_err(|e| anyhow!("failed to serialize request: {}", e))?;
+        let command = wire::Command::Call(request);
+        let request_bytes = wire::serialize(&command)
+            .map_err(|e| anyhow!("failed to serialize command: {}", e))?;
 
         send.write_all(&request_bytes).await?;
         send.finish()?;
 
         let response_bytes = recv.read_to_end(1024 * 1024).await?;
-        let response: wire::Response = wire::deserialize(&response_bytes)
+        let response: wire::CommandResponse = wire::deserialize(&response_bytes)
             .map_err(|e| anyhow!("failed to deserialize response: {}", e))?;
 
-        response
-            .result
-            .map_err(|e| anyhow!("remote actor error: {}", e))
+        match response {
+            wire::CommandResponse::Call(call_response) => call_response
+                .result
+                .map_err(|e| anyhow!("remote actor error: {}", e)),
+            other => Err(anyhow!("unexpected response type: expected Call, got {:?}", other)),
+        }
     })
 }

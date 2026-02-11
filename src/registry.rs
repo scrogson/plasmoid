@@ -148,6 +148,16 @@ impl ProcessRegistry {
         entry
     }
 
+    /// List all registered component names.
+    pub async fn list_components(&self) -> Vec<String> {
+        self.components
+            .read()
+            .await
+            .keys()
+            .cloned()
+            .collect()
+    }
+
     /// List all running processes.
     pub async fn list_processes(&self) -> Vec<(Pid, String, Option<String>)> {
         self.processes

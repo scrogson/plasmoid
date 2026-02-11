@@ -101,12 +101,15 @@ impl DocRegistry {
         }))
     }
 
-    /// Start syncing with peers and processing live events.
+    /// Start syncing and processing live events.
+    ///
+    /// Must be called once during startup. Use `add_peers` to add
+    /// bootstrap peers later.
     pub async fn start(
         self: &Arc<Self>,
         peers: &[EndpointId],
     ) -> anyhow::Result<()> {
-        // Start sync with peers (converts EndpointIds to EndpointAddrs)
+        // Start sync (empty peers = accept incoming only)
         let peer_addrs: Vec<EndpointAddr> = peers.iter().map(|id| (*id).into()).collect();
         self.doc.start_sync(peer_addrs).await?;
 
@@ -132,6 +135,13 @@ impl DocRegistry {
             tracing::debug!("Doc event stream ended");
         });
 
+        Ok(())
+    }
+
+    /// Add bootstrap peers for doc sync.
+    pub async fn add_peers(&self, peers: &[EndpointId]) -> anyhow::Result<()> {
+        let peer_addrs: Vec<EndpointAddr> = peers.iter().map(|id| (*id).into()).collect();
+        self.doc.start_sync(peer_addrs).await?;
         Ok(())
     }
 

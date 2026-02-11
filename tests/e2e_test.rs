@@ -12,9 +12,9 @@ async fn test_typed_echo_actor() {
     let wasm_bytes = std::fs::read(wasm_path).expect("echo actor WASM not found");
 
     // Create server runtime and deploy echo actor
-    let server = Arc::new(ActorRuntime::new().await.unwrap());
+    let server = Arc::new(ActorRuntime::new(None).await.unwrap());
     let _pid = server
-        .deploy("echo", &wasm_bytes, PolicySet::all())
+        .deploy("echo", &wasm_bytes, Some("echo"), PolicySet::all())
         .await
         .unwrap();
 
@@ -54,13 +54,13 @@ async fn test_caller_calls_echo() {
     let caller_wasm = std::fs::read(caller_wasm_path).expect("caller actor WASM not found");
 
     // Create server runtime and deploy both actors
-    let server = Arc::new(ActorRuntime::new().await.unwrap());
+    let server = Arc::new(ActorRuntime::new(None).await.unwrap());
     server
-        .deploy("echo", &echo_wasm, PolicySet::all())
+        .deploy("echo", &echo_wasm, Some("echo"), PolicySet::all())
         .await
         .unwrap();
     server
-        .deploy("caller", &caller_wasm, PolicySet::all())
+        .deploy("caller", &caller_wasm, Some("caller"), PolicySet::all())
         .await
         .unwrap();
 
@@ -92,7 +92,7 @@ async fn test_caller_calls_echo() {
 
 #[tokio::test]
 async fn test_runtime_startup_shutdown() {
-    let _runtime = ActorRuntime::new().await.unwrap();
+    let _runtime = ActorRuntime::new(None).await.unwrap();
 
     // Spawn runtime in background
     let handle = tokio::spawn(async move {
