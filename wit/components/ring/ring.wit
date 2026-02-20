@@ -1,0 +1,16 @@
+package plasmoid:ring@0.1.0;
+
+interface ring {
+    /// Spawn N particles in a ring, pass a message M hops, return timing info.
+    run: func(num-processes: u32, num-messages: u32) -> string;
+
+    /// Ring node receive loop. Started via notify.
+    start: func(num-processes: u32);
+}
+
+world ring-world {
+    export ring;
+
+    import plasmoid:runtime/logging@0.2.0;
+    import plasmoid:runtime/actor-context@0.2.0;
+}

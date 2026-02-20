@@ -1,0 +1,20 @@
+[package]
+name = "ring"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen-rt = "0.41"
+
+[package.metadata.component]
+package = "plasmoid:ring"
+
+[package.metadata.component.target]
+path = "../../wit/components/ring"
+world = "ring-world"
+
+[package.metadata.component.target.dependencies]
+"plasmoid:runtime" = { path = "../../wit/components/ring/deps/runtime" }

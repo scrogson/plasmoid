@@ -1,0 +1,39 @@
+package plasmoid:runtime@0.2.0;
+
+interface logging {
+    enum level {
+        trace,
+        debug,
+        info,
+        warn,
+        error,
+    }
+
+    log: func(level: level, message: string);
+}
+
+interface actor-context {
+    /// Get this process's PID (e.g. "<a3f7bc12.1>")
+    self-pid: func() -> string;
+
+    /// Get this process's registered name, if any
+    self-name: func() -> option<string>;
+
+    /// Get the caller's PID, if known
+    caller-pid: func() -> option<string>;
+
+    /// Call a function on another process by name or PID and await the response.
+    call: func(target: string, function: string, args: list<string>) -> result<list<string>, string>;
+
+    /// Send a message to another process with no response.
+    notify: func(target: string, function: string, args: list<string>) -> result<_, string>;
+
+    /// Spawn a new process from a registered behavior.
+    spawn: func(behavior: string, name: option<string>) -> result<string, string>;
+
+    /// Deposit a message into a particle's mailbox. Fire-and-forget.
+    send: func(target: string, message: list<string>) -> result<_, string>;
+
+    /// Block until a message arrives in this particle's mailbox.
+    receive: func() -> list<string>;
+}
