@@ -171,28 +171,24 @@ async fn handle_call(
     let function = request.function.clone();
     let args = request.args.clone();
 
-    let result = tokio::task::spawn_blocking(move || {
-        invoke_component(
-            &engine,
-            &component,
-            &capabilities,
-            &particle_id,
-            Some(pid),
-            Some(remote),
-            &function,
-            &args,
-            Some(&endpoint),
-            Some(registry),
-            doc_registry,
-        )
-    })
+    let result = invoke_component(
+        &engine,
+        &component,
+        &capabilities,
+        &particle_id,
+        Some(pid),
+        Some(remote),
+        &function,
+        &args,
+        Some(endpoint),
+        Some(registry),
+        doc_registry,
+    )
     .await;
 
-    // Flatten: JoinError (panic) or invocation error -> error response
     let result = match result {
-        Ok(Ok(wave_results)) => Ok(wave_results),
-        Ok(Err(e)) => Err(e.to_string()),
-        Err(join_err) => Err(format!("invocation panicked: {}", join_err)),
+        Ok(wave_results) => Ok(wave_results),
+        Err(e) => Err(e.to_string()),
     };
 
     CommandResponse::Call(CallResponse {

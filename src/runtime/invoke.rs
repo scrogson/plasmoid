@@ -18,7 +18,7 @@ use wasmtime::component::{Component, Linker, Type, Val};
 use wasmtime::Engine;
 
 /// Invoke a function on a WASM component instance.
-pub fn invoke_component(
+pub async fn invoke_component(
     engine: &Engine,
     component: &Component,
     capabilities: &PolicySet,
@@ -27,7 +27,7 @@ pub fn invoke_component(
     remote_node_id: Option<String>,
     function: &str,
     args: &[String],
-    endpoint: Option<&Endpoint>,
+    endpoint: Option<Endpoint>,
     registry: Option<Arc<ParticleRegistry>>,
     doc_registry: Option<Arc<DocRegistry>>,
 ) -> Result<Vec<String>> {
@@ -36,7 +36,7 @@ pub fn invoke_component(
     state.set_particle_name(Some(particle_id.to_string()));
     state.set_pid(pid);
     state.set_remote_node_id(remote_node_id);
-    state.set_endpoint(endpoint.cloned());
+    state.set_endpoint(endpoint.clone());
     state.set_engine(Some(engine.clone()));
     state.set_registry(registry);
     state.set_doc_registry(doc_registry);
@@ -49,7 +49,7 @@ pub fn invoke_component(
     add_host_functions(&mut linker, capabilities)?;
 
     // Instantiate the component
-    let instance = linker.instantiate(&mut store, component)?;
+    let instance = linker.instantiate_async(&mut store, component).await?;
 
     // Find the exported function.
     let func = if let Some(func) = instance.get_func(&mut store, function) {
@@ -100,10 +100,10 @@ pub fn invoke_component(
         .collect();
 
     // Call the function
-    func.call(&mut store, &params, &mut results)?;
+    func.call_async(&mut store, &params, &mut results).await?;
 
     // Post-return cleanup (required by component model)
-    func.post_return(&mut store)?;
+    func.post_return_async(&mut store).await?;
 
     // Encode results as wasm-wave strings
     let wave_results: Vec<String> = results
@@ -187,27 +187,31 @@ fn find_function_in_exports(
 /// Add host functions to the linker based on capabilities.
 fn add_host_functions(linker: &mut Linker<HostState>, capabilities: &PolicySet) -> Result<()> {
     // Add WASI interfaces (required by wasm32-wasip1 components)
-    wasmtime_wasi::p2::add_to_linker_sync(linker)?;
+    wasmtime_wasi::p2::add_to_linker_async(linker)?;
 
     // Add logging interface: plasmoid:runtime/logging@0.2.0
     {
         let mut logging = linker.instance("plasmoid:runtime/logging@0.2.0")?;
 
         if capabilities.allows("logging") {
-            logging.func_wrap(
+            logging.func_wrap_async(
                 "log",
                 |caller: wasmtime::StoreContextMut<'_, HostState>,
                  (level, message): (LogLevel, String)| {
-                    let state = caller.data();
-                    log_message(state, level, &message);
-                    Ok(())
+                    Box::new(async move {
+                        let state = caller.data();
+                        log_message(state, level, &message);
+                        Ok(())
+                    })
                 },
             )?;
         } else {
-            logging.func_wrap(
+            logging.func_wrap_async(
                 "log",
                 |_caller: wasmtime::StoreContextMut<'_, HostState>,
-                 (_level, _message): (LogLevel, String)| { Ok(()) },
+                 (_level, _message): (LogLevel, String)| {
+                    Box::new(async move { Ok(()) })
+                },
             )?;
         }
     }
@@ -217,135 +221,136 @@ fn add_host_functions(linker: &mut Linker<HostState>, capabilities: &PolicySet) 
         let mut context = linker.instance("plasmoid:runtime/actor-context@0.2.0")?;
 
         // self-pid: func() -> string
-        context.func_wrap(
+        context.func_wrap_async(
             "self-pid",
             |caller: wasmtime::StoreContextMut<'_, HostState>,
-             _: ()|
-             -> Result<(String,), _> {
-                let id = match caller.data().pid() {
-                    Some(pid) => pid.to_string(),
-                    None => caller.data().particle_id().to_string(),
-                };
-                Ok((id,))
+             _: ()| {
+                Box::new(async move {
+                    let id = match caller.data().pid() {
+                        Some(pid) => pid.to_string(),
+                        None => caller.data().particle_id().to_string(),
+                    };
+                    Ok((id,))
+                })
             },
         )?;
 
         // self-name: func() -> option<string>
-        context.func_wrap(
+        context.func_wrap_async(
             "self-name",
             |caller: wasmtime::StoreContextMut<'_, HostState>,
-             _: ()|
-             -> Result<(Option<String>,), _> {
-                let name = caller.data().particle_name().map(|s| s.to_string());
-                Ok((name,))
+             _: ()| {
+                Box::new(async move {
+                    let name = caller.data().particle_name().map(|s| s.to_string());
+                    Ok((name,))
+                })
             },
         )?;
 
         // caller-pid: func() -> option<string>
-        context.func_wrap(
+        context.func_wrap_async(
             "caller-pid",
             |caller: wasmtime::StoreContextMut<'_, HostState>,
-             _: ()|
-             -> Result<(Option<String>,), _> {
-                let id = caller.data().remote_node_id().cloned();
-                Ok((id,))
+             _: ()| {
+                Box::new(async move {
+                    let id = caller.data().remote_node_id().cloned();
+                    Ok((id,))
+                })
             },
         )?;
 
         // spawn: func(component: string, name: option<string>) -> result<string, string>
-        context.func_wrap(
+        context.func_wrap_async(
             "spawn",
             |caller: wasmtime::StoreContextMut<'_, HostState>,
-             (component, name): (String, Option<String>)|
-             -> Result<(Result<String, String>,), _> {
-                let registry = match caller.data().registry() {
-                    Some(r) => r.clone(),
-                    None => {
-                        return Ok((Err("no registry available for spawn".to_string()),));
+             (component, name): (String, Option<String>)| {
+                Box::new(async move {
+                    let registry = match caller.data().registry() {
+                        Some(r) => r.clone(),
+                        None => {
+                            return Ok((Err("no registry available for spawn".to_string()),));
+                        }
+                    };
+
+                    let result = registry.spawn(&component, name.as_deref(), None).await;
+
+                    match result {
+                        Ok(pid) => Ok((Ok(pid.to_string()),)),
+                        Err(e) => Ok((Err(e.to_string()),)),
                     }
-                };
-
-                let rt = tokio::runtime::Handle::current();
-                let result = rt.block_on(async {
-                    registry.spawn(&component, name.as_deref(), None).await
-                });
-
-                match result {
-                    Ok(pid) => Ok((Ok(pid.to_string()),)),
-                    Err(e) => Ok((Err(e.to_string()),)),
-                }
+                })
             },
         )?;
 
         // call: func(target: string, function: string, args: list<string>) -> result<list<string>, string>
-        context.func_wrap(
+        context.func_wrap_async(
             "call",
             |caller: wasmtime::StoreContextMut<'_, HostState>,
-             (target, function, args): (String, String, Vec<String>)|
-             -> Result<(Result<Vec<String>, String>,), _> {
-                if !caller.data().capabilities().allows("actor:call") {
-                    return Ok((Err("unauthorized: actor:call not permitted".to_string()),));
-                }
-
-                let engine = match caller.data().engine() {
-                    Some(e) => e.clone(),
-                    None => {
-                        return Ok((Err("no engine available for actor-to-actor calls".to_string()),));
+             (target, function, args): (String, String, Vec<String>)| {
+                Box::new(async move {
+                    if !caller.data().capabilities().allows("actor:call") {
+                        return Ok((Err("unauthorized: actor:call not permitted".to_string()),));
                     }
-                };
 
-                let registry = caller.data().registry().cloned();
-                let doc_registry = caller.data().doc_registry().cloned();
-                let endpoint = caller.data().endpoint().cloned();
-                let caller_id = caller.data().particle_id().to_string();
+                    let engine = match caller.data().engine() {
+                        Some(e) => e.clone(),
+                        None => {
+                            return Ok((Err("no engine available for actor-to-actor calls".to_string()),));
+                        }
+                    };
 
-                let result = dispatch_call(
-                    &engine,
-                    registry.as_ref(),
-                    doc_registry.as_ref(),
-                    endpoint.as_ref(),
-                    &caller_id,
-                    &target,
-                    &function,
-                    &args,
-                );
+                    let registry = caller.data().registry().cloned();
+                    let doc_registry = caller.data().doc_registry().cloned();
+                    let endpoint = caller.data().endpoint().cloned();
+                    let caller_id = caller.data().particle_id().to_string();
 
-                match result {
-                    Ok(results) => Ok((Ok(results),)),
-                    Err(e) => Ok((Err(e.to_string()),)),
-                }
+                    let result = dispatch_call(
+                        &engine,
+                        registry.as_ref(),
+                        doc_registry.as_ref(),
+                        endpoint.as_ref(),
+                        &caller_id,
+                        &target,
+                        &function,
+                        &args,
+                    )
+                    .await;
+
+                    match result {
+                        Ok(results) => Ok((Ok(results),)),
+                        Err(e) => Ok((Err(e.to_string()),)),
+                    }
+                })
             },
         )?;
 
         // notify: func(target: string, function: string, args: list<string>) -> result<_, string>
-        context.func_wrap(
+        context.func_wrap_async(
             "notify",
             |caller: wasmtime::StoreContextMut<'_, HostState>,
-             (target, function, args): (String, String, Vec<String>)|
-             -> Result<(Result<(), String>,), _> {
-                if !caller.data().capabilities().allows("actor:notify") {
-                    return Ok((Err("unauthorized: actor:notify not permitted".to_string()),));
-                }
-
-                let engine = match caller.data().engine() {
-                    Some(e) => e.clone(),
-                    None => {
-                        return Ok((Err(
-                            "no engine available for actor-to-actor calls".to_string(),
-                        ),));
+             (target, function, args): (String, String, Vec<String>)| {
+                Box::new(async move {
+                    if !caller.data().capabilities().allows("actor:notify") {
+                        return Ok((Err("unauthorized: actor:notify not permitted".to_string()),));
                     }
-                };
 
-                let registry = caller.data().registry().cloned();
-                let doc_registry = caller.data().doc_registry().cloned();
-                let endpoint = caller.data().endpoint().cloned();
-                let caller_id = caller.data().particle_id().to_string();
+                    let engine = match caller.data().engine() {
+                        Some(e) => e.clone(),
+                        None => {
+                            return Ok((Err(
+                                "no engine available for actor-to-actor calls".to_string(),
+                            ),));
+                        }
+                    };
 
-                // Fire-and-forget: spawn a background task for the invocation
-                let rt = tokio::runtime::Handle::current();
-                rt.spawn(async move {
-                    let result = tokio::task::spawn_blocking(move || {
-                        dispatch_call(
+                    let registry = caller.data().registry().cloned();
+                    let doc_registry = caller.data().doc_registry().cloned();
+                    let endpoint = caller.data().endpoint().cloned();
+                    let caller_id = caller.data().particle_id().to_string();
+
+                    // Fire-and-forget: spawn a background task for the invocation
+                    tokio::spawn(async move {
+                        let result = dispatch_call(
                             &engine,
                             registry.as_ref(),
                             doc_registry.as_ref(),
@@ -355,76 +360,73 @@ fn add_host_functions(linker: &mut Linker<HostState>, capabilities: &PolicySet) 
                             &function,
                             &args,
                         )
-                    })
-                    .await;
+                        .await;
 
-                    match result {
-                        Ok(Ok(_)) => {}
-                        Ok(Err(e)) => {
-                            tracing::warn!(error = %e, "notify dispatch failed");
+                        match result {
+                            Ok(_) => {}
+                            Err(e) => {
+                                tracing::warn!(error = %e, "notify dispatch failed");
+                            }
                         }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "notify task panicked");
-                        }
-                    }
-                });
+                    });
 
-                Ok((Ok(()),))
+                    Ok((Ok(()),))
+                })
             },
         )?;
 
         // send: func(target: string, message: list<string>) -> result<_, string>
-        context.func_wrap(
+        context.func_wrap_async(
             "send",
             |caller: wasmtime::StoreContextMut<'_, HostState>,
-             (target, message): (String, Vec<String>)|
-             -> Result<(Result<(), String>,), _> {
-                if !caller.data().capabilities().allows("actor:send") {
-                    return Ok((Err("unauthorized: actor:send not permitted".to_string()),));
-                }
-
-                let registry = match caller.data().registry() {
-                    Some(r) => r.clone(),
-                    None => {
-                        return Ok((Err("no registry available for send".to_string()),));
+             (target, message): (String, Vec<String>)| {
+                Box::new(async move {
+                    if !caller.data().capabilities().allows("actor:send") {
+                        return Ok((Err("unauthorized: actor:send not permitted".to_string()),));
                     }
-                };
 
-                let rt = tokio::runtime::Handle::current();
-                let result = rt.block_on(registry.send_message(&target, message));
+                    let registry = match caller.data().registry() {
+                        Some(r) => r.clone(),
+                        None => {
+                            return Ok((Err("no registry available for send".to_string()),));
+                        }
+                    };
 
-                match result {
-                    Ok(()) => Ok((Ok(()),)),
-                    Err(e) => Ok((Err(e.to_string()),)),
-                }
+                    let result = registry.send_message(&target, message).await;
+
+                    match result {
+                        Ok(()) => Ok((Ok(()),)),
+                        Err(e) => Ok((Err(e.to_string()),)),
+                    }
+                })
             },
         )?;
 
         // receive: func() -> list<string>
-        context.func_wrap(
+        context.func_wrap_async(
             "receive",
             |caller: wasmtime::StoreContextMut<'_, HostState>,
-             _: ()|
-             -> Result<(Vec<String>,), _> {
-                let pid = match caller.data().pid() {
-                    Some(pid) => pid.clone(),
-                    None => {
-                        return Ok((vec!["error: no mailbox (particle not spawned)".to_string()],));
-                    }
-                };
+             _: ()| {
+                Box::new(async move {
+                    let pid = match caller.data().pid() {
+                        Some(pid) => pid.clone(),
+                        None => {
+                            return Ok((vec!["error: no mailbox (particle not spawned)".to_string()],));
+                        }
+                    };
 
-                let registry = match caller.data().registry() {
-                    Some(r) => r.clone(),
-                    None => {
-                        return Ok((vec!["error: no registry available".to_string()],));
-                    }
-                };
+                    let registry = match caller.data().registry() {
+                        Some(r) => r.clone(),
+                        None => {
+                            return Ok((vec!["error: no registry available".to_string()],));
+                        }
+                    };
 
-                let rt = tokio::runtime::Handle::current();
-                match rt.block_on(registry.receive_message(&pid)) {
-                    Ok(msg) => Ok((msg,)),
-                    Err(e) => Ok((vec![format!("error: {}", e)],)),
-                }
+                    match registry.receive_message(&pid).await {
+                        Ok(msg) => Ok((msg,)),
+                        Err(e) => Ok((vec![format!("error: {}", e)],)),
+                    }
+                })
             },
         )?;
     }
@@ -438,7 +440,7 @@ fn add_host_functions(linker: &mut Linker<HostState>, capabilities: &PolicySet) 
 /// 2. If doc registry exists, check for remote particles
 /// 3. Local -> direct WASM invocation
 /// 4. Remote -> QUIC call to remote node
-fn dispatch_call(
+async fn dispatch_call(
     engine: &Engine,
     registry: Option<&Arc<ParticleRegistry>>,
     doc_registry: Option<&Arc<DocRegistry>>,
@@ -448,12 +450,10 @@ fn dispatch_call(
     function: &str,
     args: &[String],
 ) -> Result<Vec<String>> {
-    let rt = tokio::runtime::Handle::current();
-
     // Try local resolution first (by name or PID string)
     if let Some(registry) = registry {
-        if let Some(pid) = rt.block_on(registry.resolve_target(target)) {
-            if let Some(particle) = rt.block_on(registry.get_by_pid(&pid)) {
+        if let Some(pid) = registry.resolve_target(target).await {
+            if let Some(particle) = registry.get_by_pid(&pid).await {
                 return invoke_component(
                     engine,
                     &particle.component,
@@ -463,22 +463,23 @@ fn dispatch_call(
                     Some(caller_id.to_string()),
                     function,
                     args,
-                    endpoint,
+                    endpoint.cloned(),
                     Some(registry.clone()),
                     doc_registry.map(|r| r.clone()),
-                );
+                )
+                .await;
             }
         }
     }
 
     // Try doc registry resolution
     if let Some(doc_registry) = doc_registry {
-        if let Some(resolved) = rt.block_on(doc_registry.resolve_name(target)) {
+        if let Some(resolved) = doc_registry.resolve_name(target).await {
             match resolved {
                 ResolvedParticle::Local(pid) => {
                     // Shouldn't happen (we checked local first), but handle it
                     if let Some(registry) = registry {
-                        if let Some(particle) = rt.block_on(registry.get_by_pid(&pid)) {
+                        if let Some(particle) = registry.get_by_pid(&pid).await {
                             return invoke_component(
                                 engine,
                                 &particle.component,
@@ -488,10 +489,11 @@ fn dispatch_call(
                                 Some(caller_id.to_string()),
                                 function,
                                 args,
-                                endpoint,
+                                endpoint.cloned(),
                                 Some(registry.clone()),
                                 Some(doc_registry.clone()),
-                            );
+                            )
+                            .await;
                         }
                     }
                 }
@@ -504,7 +506,8 @@ fn dispatch_call(
                         target,
                         function,
                         args,
-                    );
+                    )
+                    .await;
                 }
             }
         }
@@ -514,49 +517,45 @@ fn dispatch_call(
 }
 
 /// Perform a remote call via QUIC.
-fn remote_call(
+async fn remote_call(
     endpoint: &Endpoint,
     remote: &crate::doc_registry::RemoteParticle,
     target: &str,
     function: &str,
     args: &[String],
 ) -> Result<Vec<String>> {
-    let rt = tokio::runtime::Handle::current();
+    let conn = endpoint
+        .connect(remote.addr.clone(), PLASMOID_ALPN)
+        .await
+        .map_err(|e| anyhow!("failed to connect to remote node: {}", e))?;
 
-    rt.block_on(async {
-        let conn = endpoint
-            .connect(remote.addr.clone(), PLASMOID_ALPN)
-            .await
-            .map_err(|e| anyhow!("failed to connect to remote node: {}", e))?;
+    let (mut send, mut recv) = conn
+        .open_bi()
+        .await
+        .map_err(|e| anyhow!("failed to open stream: {}", e))?;
 
-        let (mut send, mut recv) = conn
-            .open_bi()
-            .await
-            .map_err(|e| anyhow!("failed to open stream: {}", e))?;
+    let request = wire::CallRequest {
+        id: 0,
+        target: wire::Target::Name(target.to_string()),
+        function: function.to_string(),
+        args: args.to_vec(),
+    };
 
-        let request = wire::CallRequest {
-            id: 0,
-            target: wire::Target::Name(target.to_string()),
-            function: function.to_string(),
-            args: args.to_vec(),
-        };
+    let command = wire::Command::Call(request);
+    let request_bytes = wire::serialize(&command)
+        .map_err(|e| anyhow!("failed to serialize command: {}", e))?;
 
-        let command = wire::Command::Call(request);
-        let request_bytes = wire::serialize(&command)
-            .map_err(|e| anyhow!("failed to serialize command: {}", e))?;
+    send.write_all(&request_bytes).await?;
+    send.finish()?;
 
-        send.write_all(&request_bytes).await?;
-        send.finish()?;
+    let response_bytes = recv.read_to_end(1024 * 1024).await?;
+    let response: wire::CommandResponse = wire::deserialize(&response_bytes)
+        .map_err(|e| anyhow!("failed to deserialize response: {}", e))?;
 
-        let response_bytes = recv.read_to_end(1024 * 1024).await?;
-        let response: wire::CommandResponse = wire::deserialize(&response_bytes)
-            .map_err(|e| anyhow!("failed to deserialize response: {}", e))?;
-
-        match response {
-            wire::CommandResponse::Call(call_response) => call_response
-                .result
-                .map_err(|e| anyhow!("particle returned error: {}", e)),
-            other => Err(anyhow!("unexpected response type: expected Call, got {:?}", other)),
-        }
-    })
+    match response {
+        wire::CommandResponse::Call(call_response) => call_response
+            .result
+            .map_err(|e| anyhow!("particle returned error: {}", e)),
+        other => Err(anyhow!("unexpected response type: expected Call, got {:?}", other)),
+    }
 }

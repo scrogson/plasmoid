@@ -17,7 +17,7 @@ bytes = "1"
 futures-lite = "2"
 
 # WASM Runtime
-wasmtime = { version = "41", features = ["component-model", "wave"] }
+wasmtime = { version = "41", features = ["component-model", "wave", "async"] }
 wasmtime-wasi = "41"
 
 # Authorization

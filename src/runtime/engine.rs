@@ -79,6 +79,7 @@ impl Runtime {
         // Configure wasmtime
         let mut config = Config::new();
         config.wasm_component_model(true);
+        config.async_support(true);
         let engine = Engine::new(&config)?;
 
         // Load or generate secret key
