@@ -15,36 +15,36 @@ description = "Build plasmoid (release)"
 run = "cargo build --release"
 
 [tasks."build:echo"]
-description = "Build the echo actor WASM component"
-dir = "actors/echo"
+description = "Build the echo WASM component"
+dir = "components/echo"
 run = """
 cargo component build --release
 cp target/wasm32-wasip1/release/echo_actor.wasm ../../target/debug/
 """
 
 [tasks."build:caller"]
-description = "Build the caller actor WASM component"
-dir = "actors/caller"
+description = "Build the caller WASM component"
+dir = "components/caller"
 run = """
 cargo component build --release
 cp target/wasm32-wasip1/release/caller_actor.wasm ../../target/debug/
 """
 
-[tasks."build:actors"]
-description = "Build all actor WASM components"
+[tasks."build:components"]
+description = "Build all WASM components"
 depends = ["build:echo", "build:caller"]
 
 [tasks."build:all"]
-description = "Build plasmoid and all actors"
-depends = ["build", "build:actors"]
+description = "Build plasmoid and all components"
+depends = ["build", "build:components"]
 
 [tasks.run]
-description = "Start a plasmoid node, loading all actors from target/debug"
+description = "Start a plasmoid node, loading all components from target/debug"
 depends = ["build:all"]
 run = "plasmoid start --load-path target/debug"
 
 [tasks."node:a"]
-description = "Start node A with echo actor"
+description = "Start node A with echo component"
 depends = ["build:all"]
 run = """
 plasmoid start --data-dir ~/.config/plasmoid/node-a --load-path target/debug \
@@ -52,7 +52,7 @@ plasmoid start --data-dir ~/.config/plasmoid/node-a --load-path target/debug \
 """
 
 [tasks."node:b"]
-description = "Start node B with caller actor, peered to node A"
+description = "Start node B with caller component, peered to node A"
 depends = ["build:all"]
 run = """
 plasmoid start --data-dir ~/.config/plasmoid/node-b --load-path target/debug \

@@ -8,7 +8,7 @@ use std::time::Duration;
 #[ignore = "requires echo actor WASM to be built"]
 async fn test_typed_echo_actor() {
     // Read the echo actor WASM
-    let wasm_path = "actors/echo/target/wasm32-wasip1/release/echo_actor.wasm";
+    let wasm_path = "components/echo/target/wasm32-wasip1/release/echo_actor.wasm";
     let wasm_bytes = std::fs::read(wasm_path).expect("echo actor WASM not found");
 
     // Create server runtime and deploy echo actor
@@ -48,8 +48,8 @@ async fn test_typed_echo_actor() {
 #[ignore = "requires echo and caller actor WASMs to be built"]
 async fn test_caller_calls_echo() {
     // Read both actor WASMs
-    let echo_wasm_path = "actors/echo/target/wasm32-wasip1/release/echo_actor.wasm";
-    let caller_wasm_path = "actors/caller/target/wasm32-wasip1/release/caller_actor.wasm";
+    let echo_wasm_path = "components/echo/target/wasm32-wasip1/release/echo_actor.wasm";
+    let caller_wasm_path = "components/caller/target/wasm32-wasip1/release/caller_actor.wasm";
     let echo_wasm = std::fs::read(echo_wasm_path).expect("echo actor WASM not found");
     let caller_wasm = std::fs::read(caller_wasm_path).expect("caller actor WASM not found");
 
