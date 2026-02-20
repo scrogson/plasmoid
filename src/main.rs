@@ -440,15 +440,22 @@ fn find_workspace_root() -> Result<PathBuf> {
 }
 
 fn cmd_new(args: &[String]) -> Result<()> {
-    let app_name = args
+    let arg = args
         .first()
         .ok_or_else(|| anyhow::anyhow!("usage: plasmoid new <app-name>"))?;
 
+    let root = Path::new(arg);
+
+    // Derive the app name from the last path component
+    let app_name = root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| anyhow::anyhow!("cannot derive app name from '{}'", arg))?;
+
     validate_name(app_name)?;
 
-    let root = Path::new(app_name);
     if root.exists() {
-        bail!("directory '{}' already exists", app_name);
+        bail!("directory '{}' already exists", root.display());
     }
 
     // Create directory structure
@@ -476,14 +483,15 @@ resolver = "2"
     // components/.gitkeep
     std::fs::write(root.join("components/.gitkeep"), "")?;
 
+    let display_path = root.display();
     println!(r#"Created application "{app_name}""#);
     println!();
-    println!("  {app_name}/Cargo.toml");
-    println!("  {app_name}/wit/world.wit");
-    println!("  {app_name}/wit/components/deps/runtime/world.wit");
-    println!("  {app_name}/components/");
+    println!("  {display_path}/Cargo.toml");
+    println!("  {display_path}/wit/world.wit");
+    println!("  {display_path}/wit/components/deps/runtime/world.wit");
+    println!("  {display_path}/components/");
     println!();
-    println!("Next: cd {app_name} && plasmoid component new <name>");
+    println!("Next: cd {display_path} && plasmoid component new <name>");
 
     Ok(())
 }
