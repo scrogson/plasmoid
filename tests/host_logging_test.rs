@@ -14,7 +14,7 @@ fn test_log_level_from_u32() {
 #[test]
 fn test_log_function_exists() {
     let state = HostState::new(
-        "test-actor".to_string(),
+        "test-particle".to_string(),
         PolicySet::with_capabilities(&["logging"]),
     );
 

@@ -1,6 +1,6 @@
-use plasmoid::client::ActorRef;
+use plasmoid::client::ParticleRef;
 use plasmoid::policy::PolicySet;
-use plasmoid::ActorRuntime;
+use plasmoid::Runtime;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,13 +12,13 @@ async fn test_typed_echo_actor() {
     let wasm_bytes = std::fs::read(wasm_path).expect("echo actor WASM not found");
 
     // Create server runtime and deploy echo actor
-    let server = Arc::new(ActorRuntime::new(None).await.unwrap());
+    let server = Arc::new(Runtime::new(None).await.unwrap());
     let _pid = server
         .deploy("echo", &wasm_bytes, Some("echo"), PolicySet::all())
         .await
         .unwrap();
 
-    assert!(server.has_process("echo").await);
+    assert!(server.has_particle("echo").await);
 
     // Spawn the server accept loop in background
     let srv = server.clone();
@@ -32,8 +32,8 @@ async fn test_typed_echo_actor() {
     // Create a separate client endpoint (iroh doesn't allow self-connections)
     let client_endpoint = iroh::Endpoint::builder().bind().await.unwrap();
 
-    // Create a remote actor ref pointing to the server
-    let echo = ActorRef::remote_by_name(client_endpoint, "echo", server.node_addr());
+    // Create a remote particle ref pointing to the server
+    let echo = ParticleRef::remote_by_name(client_endpoint, "echo", server.node_addr());
 
     // Test echo function
     let result = echo.call("echo", &["\"hello world\""]).await.unwrap();
@@ -53,8 +53,8 @@ async fn test_caller_calls_echo() {
     let echo_wasm = std::fs::read(echo_wasm_path).expect("echo actor WASM not found");
     let caller_wasm = std::fs::read(caller_wasm_path).expect("caller actor WASM not found");
 
-    // Create server runtime and deploy both actors
-    let server = Arc::new(ActorRuntime::new(None).await.unwrap());
+    // Create server runtime and deploy both components
+    let server = Arc::new(Runtime::new(None).await.unwrap());
     server
         .deploy("echo", &echo_wasm, Some("echo"), PolicySet::all())
         .await
@@ -64,8 +64,8 @@ async fn test_caller_calls_echo() {
         .await
         .unwrap();
 
-    assert!(server.has_process("echo").await);
-    assert!(server.has_process("caller").await);
+    assert!(server.has_particle("echo").await);
+    assert!(server.has_particle("caller").await);
 
     // Spawn the server accept loop in background
     let srv = server.clone();
@@ -79,10 +79,10 @@ async fn test_caller_calls_echo() {
     // Create a separate client endpoint (iroh doesn't allow self-connections)
     let client_endpoint = iroh::Endpoint::builder().bind().await.unwrap();
 
-    // Create a remote actor ref pointing to the caller actor
-    let caller = ActorRef::remote_by_name(client_endpoint, "caller", server.node_addr());
+    // Create a remote particle ref pointing to the caller
+    let caller = ParticleRef::remote_by_name(client_endpoint, "caller", server.node_addr());
 
-    // Call the caller actor's call-echo function
+    // Call the caller's call-echo function
     // The caller will internally call echo's echo function
     let result = caller.call("call-echo", &["\"hello from caller\""]).await.unwrap();
 
@@ -92,7 +92,7 @@ async fn test_caller_calls_echo() {
 
 #[tokio::test]
 async fn test_runtime_startup_shutdown() {
-    let _runtime = ActorRuntime::new(None).await.unwrap();
+    let _runtime = Runtime::new(None).await.unwrap();
 
     // Spawn runtime in background
     let handle = tokio::spawn(async move {

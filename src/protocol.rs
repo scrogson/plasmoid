@@ -1,6 +1,6 @@
-use crate::doc_registry::{DocRegistry, ResolvedProcess};
-use crate::registry::ProcessRegistry;
-use crate::runtime::invoke::invoke_actor;
+use crate::doc_registry::{DocRegistry, ResolvedParticle};
+use crate::registry::ParticleRegistry;
+use crate::runtime::invoke::invoke_component;
 use crate::runtime::PLASMOID_ALPN;
 use crate::wire::{
     self, deserialize, serialize, CallRequest, CallResponse, Command, CommandResponse,
@@ -12,13 +12,13 @@ use iroh::Endpoint;
 use std::sync::Arc;
 use wasmtime::Engine;
 
-/// Protocol handler for plasmoid actor traffic.
+/// Protocol handler for plasmoid traffic.
 ///
 /// Implements iroh's `ProtocolHandler` trait to handle incoming QUIC
 /// connections routed by the Router based on ALPN.
 #[derive(Debug, Clone)]
 pub struct PlasmoidProtocol {
-    registry: Arc<ProcessRegistry>,
+    registry: Arc<ParticleRegistry>,
     engine: Engine,
     endpoint: Endpoint,
     doc_registry: Option<Arc<DocRegistry>>,
@@ -26,7 +26,7 @@ pub struct PlasmoidProtocol {
 
 impl PlasmoidProtocol {
     pub fn new(
-        registry: Arc<ProcessRegistry>,
+        registry: Arc<ParticleRegistry>,
         engine: Engine,
         endpoint: Endpoint,
         doc_registry: Option<Arc<DocRegistry>>,
@@ -86,7 +86,7 @@ impl iroh::protocol::ProtocolHandler for PlasmoidProtocol {
 async fn handle_stream(
     mut send: iroh::endpoint::SendStream,
     mut recv: iroh::endpoint::RecvStream,
-    registry: Arc<ProcessRegistry>,
+    registry: Arc<ParticleRegistry>,
     engine: Engine,
     remote_node_id: String,
     endpoint: Endpoint,
@@ -121,7 +121,7 @@ async fn handle_stream(
 
 async fn handle_call(
     request: CallRequest,
-    registry: Arc<ProcessRegistry>,
+    registry: Arc<ParticleRegistry>,
     engine: Engine,
     remote_node_id: String,
     endpoint: Endpoint,
@@ -130,7 +130,7 @@ async fn handle_call(
     tracing::debug!(target = ?request.target, function = %request.function, "Received call request");
 
     // Resolve the target -- check local registry first
-    let process = match &request.target {
+    let particle = match &request.target {
         Target::Pid(pid) => registry.get_by_pid(pid).await,
         Target::Name(name) => {
             if let Some(pid) = registry.get_by_name(name).await {
@@ -141,42 +141,42 @@ async fn handle_call(
         }
     };
 
-    let process = match process {
+    let particle = match particle {
         Some(p) => p,
         None => {
-            // Check doc registry for remote processes and forward
+            // Check doc registry for remote particles and forward
             if let Some(ref doc_reg) = doc_registry {
                 let resolved = match &request.target {
                     Target::Name(name) => doc_reg.resolve_name(name).await,
                     Target::Pid(pid) => doc_reg.resolve_pid(pid).await,
                 };
 
-                if let Some(ResolvedProcess::Remote(remote)) = resolved {
+                if let Some(ResolvedParticle::Remote(remote)) = resolved {
                     return forward_to_remote(&endpoint, &remote, &request).await;
                 }
             }
 
             return CommandResponse::Call(CallResponse {
                 id: request.id,
-                result: Err(format!("no process found for target {:?}", request.target)),
+                result: Err(format!("no particle found for target {:?}", request.target)),
             });
         }
     };
 
-    let component = process.component.clone();
-    let capabilities = process.capabilities.clone();
-    let actor_id = process.name.unwrap_or_else(|| process.pid.to_string());
-    let pid = process.pid.clone();
+    let component = particle.component.clone();
+    let capabilities = particle.capabilities.clone();
+    let particle_id = particle.name.unwrap_or_else(|| particle.pid.to_string());
+    let pid = particle.pid.clone();
     let remote = remote_node_id.clone();
     let function = request.function.clone();
     let args = request.args.clone();
 
     let result = tokio::task::spawn_blocking(move || {
-        invoke_actor(
+        invoke_component(
             &engine,
             &component,
             &capabilities,
-            &actor_id,
+            &particle_id,
             Some(pid),
             Some(remote),
             &function,
@@ -203,7 +203,7 @@ async fn handle_call(
 
 async fn handle_spawn(
     request: SpawnRequest,
-    registry: Arc<ProcessRegistry>,
+    registry: Arc<ParticleRegistry>,
     doc_registry: Option<Arc<DocRegistry>>,
 ) -> CommandResponse {
     tracing::debug!(component = %request.component, name = ?request.name, "Received spawn request");
@@ -238,7 +238,7 @@ async fn handle_spawn(
 /// Forward a request to a remote node and return the response.
 async fn forward_to_remote(
     endpoint: &Endpoint,
-    remote: &crate::doc_registry::RemoteProcess,
+    remote: &crate::doc_registry::RemoteParticle,
     request: &CallRequest,
 ) -> CommandResponse {
     tracing::debug!(

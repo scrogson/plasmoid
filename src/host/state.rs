@@ -1,7 +1,7 @@
 use crate::doc_registry::DocRegistry;
 use crate::pid::Pid;
 use crate::policy::PolicySet;
-use crate::registry::ProcessRegistry;
+use crate::registry::ParticleRegistry;
 use iroh::Endpoint;
 use std::sync::Arc;
 use wasmtime::Engine;
@@ -10,15 +10,15 @@ use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 /// State available to host functions during WASM execution.
 pub struct HostState {
-    actor_id: String,
-    actor_name: Option<String>,
+    particle_id: String,
+    particle_name: Option<String>,
     capabilities: PolicySet,
     pid: Option<Pid>,
     remote_pid: Option<Pid>,
     remote_node_id: Option<String>,
     endpoint: Option<Endpoint>,
     engine: Option<Engine>,
-    registry: Option<Arc<ProcessRegistry>>,
+    registry: Option<Arc<ParticleRegistry>>,
     doc_registry: Option<Arc<DocRegistry>>,
     wasi_ctx: WasiCtx,
     resource_table: ResourceTable,
@@ -27,7 +27,7 @@ pub struct HostState {
 impl std::fmt::Debug for HostState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HostState")
-            .field("actor_id", &self.actor_id)
+            .field("particle_id", &self.particle_id)
             .field("capabilities", &self.capabilities)
             .field("pid", &self.pid)
             .field("remote_node_id", &self.remote_node_id)
@@ -45,10 +45,10 @@ impl WasiView for HostState {
 }
 
 impl HostState {
-    pub fn new(actor_id: String, capabilities: PolicySet) -> Self {
+    pub fn new(particle_id: String, capabilities: PolicySet) -> Self {
         Self {
-            actor_id,
-            actor_name: None,
+            particle_id,
+            particle_name: None,
             capabilities,
             pid: None,
             remote_pid: None,
@@ -62,16 +62,16 @@ impl HostState {
         }
     }
 
-    pub fn actor_id(&self) -> &str {
-        &self.actor_id
+    pub fn particle_id(&self) -> &str {
+        &self.particle_id
     }
 
-    pub fn actor_name(&self) -> Option<&str> {
-        self.actor_name.as_deref()
+    pub fn particle_name(&self) -> Option<&str> {
+        self.particle_name.as_deref()
     }
 
-    pub fn set_actor_name(&mut self, name: Option<String>) {
-        self.actor_name = name;
+    pub fn set_particle_name(&mut self, name: Option<String>) {
+        self.particle_name = name;
     }
 
     pub fn capabilities(&self) -> &PolicySet {
@@ -118,11 +118,11 @@ impl HostState {
         self.engine = engine;
     }
 
-    pub fn registry(&self) -> Option<&Arc<ProcessRegistry>> {
+    pub fn registry(&self) -> Option<&Arc<ParticleRegistry>> {
         self.registry.as_ref()
     }
 
-    pub fn set_registry(&mut self, registry: Option<Arc<ProcessRegistry>>) {
+    pub fn set_registry(&mut self, registry: Option<Arc<ParticleRegistry>>) {
         self.registry = registry;
     }
 

@@ -4,11 +4,11 @@ use plasmoid::policy::PolicySet;
 #[test]
 fn test_host_state_creation() {
     let state = HostState::new(
-        "test-actor".to_string(),
+        "test-particle".to_string(),
         PolicySet::with_capabilities(&["logging"]),
     );
 
-    assert_eq!(state.actor_id(), "test-actor");
+    assert_eq!(state.particle_id(), "test-particle");
     assert!(state.capabilities().allows("logging"));
     assert!(!state.capabilities().allows("db:read"));
 }
@@ -16,7 +16,7 @@ fn test_host_state_creation() {
 #[test]
 fn test_host_state_remote_node() {
     let mut state = HostState::new(
-        "test-actor".to_string(),
+        "test-particle".to_string(),
         PolicySet::empty(),
     );
 

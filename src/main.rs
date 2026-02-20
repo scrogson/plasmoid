@@ -1,8 +1,8 @@
 use anyhow::{bail, Result};
 use iroh::EndpointId;
-use plasmoid::client::{ActorRef, NodeClient};
+use plasmoid::client::{ParticleRef, NodeClient};
 use plasmoid::policy::PolicySet;
-use plasmoid::ActorRuntime;
+use plasmoid::Runtime;
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
@@ -16,16 +16,16 @@ Usage:
                                              (default: ~/.config/plasmoid)
         --load-path <dir>                    Load all .wasm files from directory
         --peer <node-id>                     Bootstrap peer for cluster sync
-        --spawn <component> [--name <name>]  Spawn a process after loading
+        --spawn <component> [--name <name>]  Spawn a particle after loading
 
       Component name is derived from the file stem (e.g. echo_actor.wasm -> echo_actor).
 
   plasmoid spawn [--node <id>] <component> [--name <name>]
-      Spawn a process on a running node. Prints the PID.
+      Spawn a particle on a running node. Prints the PID.
       Uses PLASMOID_NODE env var if --node not specified.
 
   plasmoid call [<node-id>] <name> <function> [args...]
-      Call a function on an actor. If the first arg is not a valid node ID,
+      Call a function on a particle. If the first arg is not a valid node ID,
       uses PLASMOID_NODE env var as the bootstrap node.
       Arguments are wasm-wave encoded (strings need quotes: '\"hello\"').
 
@@ -168,7 +168,7 @@ async fn cmd_start(args: &[String]) -> Result<()> {
     eprintln!();
 
     let data_dir = data_dir.unwrap_or_else(default_data_dir);
-    let runtime = ActorRuntime::new(Some(&data_dir)).await?;
+    let runtime = Runtime::new(Some(&data_dir)).await?;
 
     eprintln!("Node: {}", runtime.node_id());
     eprintln!();
@@ -211,7 +211,7 @@ async fn cmd_start(args: &[String]) -> Result<()> {
             pids.push((pid, spec.component.clone(), spec.name.clone()));
         }
 
-        eprintln!("Processes:");
+        eprintln!("Particles:");
         for (pid, component, name) in &pids {
             match name {
                 Some(n) => eprintln!("  {pid}  {component}  (name: {n})"),
@@ -326,9 +326,9 @@ async fn cmd_call(args: &[String]) -> Result<()> {
         .address_lookup(mdns)
         .bind()
         .await?;
-    let actor = ActorRef::remote_by_name(endpoint, name, node_id);
+    let particle = ParticleRef::remote_by_name(endpoint, name, node_id);
 
-    let results = actor.call(function, &call_args).await?;
+    let results = particle.call(function, &call_args).await?;
 
     for result in &results {
         println!("{result}");

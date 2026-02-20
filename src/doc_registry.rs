@@ -1,5 +1,5 @@
 use crate::pid::Pid;
-use crate::registry::ProcessRegistry;
+use crate::registry::ParticleRegistry;
 use iroh::{Endpoint, EndpointAddr, EndpointId};
 use iroh_blobs::store::mem::MemStore;
 use iroh_docs::engine::LiveEvent;
@@ -23,14 +23,14 @@ pub struct RegistryEntry {
 
 /// Result of resolving a name or PID.
 #[derive(Debug, Clone)]
-pub enum ResolvedProcess {
+pub enum ResolvedParticle {
     Local(Pid),
-    Remote(RemoteProcess),
+    Remote(RemoteParticle),
 }
 
-/// Information about a process on a remote node.
+/// Information about a particle on a remote node.
 #[derive(Debug, Clone)]
-pub struct RemoteProcess {
+pub struct RemoteParticle {
     pub pid: Pid,
     pub component: String,
     pub name: Option<String>,
@@ -43,14 +43,14 @@ pub struct RemoteProcess {
 /// Replaces the gossip-based registry with a replicated document that
 /// provides automatic sync, persistence, and catch-up for late joiners.
 pub struct DocRegistry {
-    local: Arc<ProcessRegistry>,
+    local: Arc<ParticleRegistry>,
     endpoint: Endpoint,
     docs: Docs,
     blobs: MemStore,
     doc: iroh_docs::api::Doc,
     author: iroh_docs::AuthorId,
-    remote_names: Arc<RwLock<HashMap<String, RemoteProcess>>>,
-    remote_pids: Arc<RwLock<HashMap<Pid, RemoteProcess>>>,
+    remote_names: Arc<RwLock<HashMap<String, RemoteParticle>>>,
+    remote_pids: Arc<RwLock<HashMap<Pid, RemoteParticle>>>,
 }
 
 impl std::fmt::Debug for DocRegistry {
@@ -72,7 +72,7 @@ impl DocRegistry {
     /// All nodes derive the same namespace from "plasmoid-registry-v1",
     /// so they can sync the same document without ticket exchange.
     pub async fn new(
-        local: Arc<ProcessRegistry>,
+        local: Arc<ParticleRegistry>,
         endpoint: Endpoint,
         docs: Docs,
         blobs: MemStore,
@@ -162,7 +162,7 @@ impl DocRegistry {
                     return Ok(());
                 }
 
-                let remote = RemoteProcess {
+                let remote = RemoteParticle {
                     pid: registry_entry.pid.clone(),
                     component: registry_entry.component,
                     name: registry_entry.name.clone(),
@@ -176,7 +176,7 @@ impl DocRegistry {
                             pid = %remote.pid,
                             name = %name,
                             node = %remote.node.fmt_short(),
-                            "Remote process registered (via doc)"
+                            "Remote particle registered (via doc)"
                         );
                         self.remote_names.write().await.insert(name.clone(), remote.clone());
                     }
@@ -195,7 +195,7 @@ impl DocRegistry {
                             return Ok(());
                         }
 
-                        let remote = RemoteProcess {
+                        let remote = RemoteParticle {
                             pid: entry.pid.clone(),
                             component: entry.component,
                             name: entry.name.clone(),
@@ -221,7 +221,7 @@ impl DocRegistry {
         Ok(())
     }
 
-    /// Announce a newly spawned process to the registry document.
+    /// Announce a newly spawned particle to the registry document.
     pub async fn announce_spawn(
         &self,
         pid: &Pid,
@@ -251,7 +251,7 @@ impl DocRegistry {
         Ok(())
     }
 
-    /// Announce that a process is down (delete entries).
+    /// Announce that a particle is down (delete entries).
     pub async fn announce_down(&self, pid: &Pid) -> anyhow::Result<()> {
         let pid_key = format!("pid/{}", pid);
         self.doc.del(self.author, pid_key).await?;
@@ -269,28 +269,28 @@ impl DocRegistry {
     }
 
     /// Resolve a name: local first, then remote cache.
-    pub async fn resolve_name(&self, name: &str) -> Option<ResolvedProcess> {
+    pub async fn resolve_name(&self, name: &str) -> Option<ResolvedParticle> {
         if let Some(pid) = self.local.get_by_name(name).await {
-            return Some(ResolvedProcess::Local(pid));
+            return Some(ResolvedParticle::Local(pid));
         }
 
         if let Some(remote) = self.remote_names.read().await.get(name) {
-            return Some(ResolvedProcess::Remote(remote.clone()));
+            return Some(ResolvedParticle::Remote(remote.clone()));
         }
 
         None
     }
 
     /// Resolve a PID: check if local, then remote cache.
-    pub async fn resolve_pid(&self, pid: &Pid) -> Option<ResolvedProcess> {
+    pub async fn resolve_pid(&self, pid: &Pid) -> Option<ResolvedParticle> {
         if pid.is_local_to(&self.endpoint.id()) {
             if self.local.get_by_pid(pid).await.is_some() {
-                return Some(ResolvedProcess::Local(pid.clone()));
+                return Some(ResolvedParticle::Local(pid.clone()));
             }
         }
 
         if let Some(remote) = self.remote_pids.read().await.get(pid) {
-            return Some(ResolvedProcess::Remote(remote.clone()));
+            return Some(ResolvedParticle::Remote(remote.clone()));
         }
 
         None
@@ -302,7 +302,7 @@ impl DocRegistry {
     }
 
     /// Get the local registry.
-    pub fn local(&self) -> &Arc<ProcessRegistry> {
+    pub fn local(&self) -> &Arc<ParticleRegistry> {
         &self.local
     }
 

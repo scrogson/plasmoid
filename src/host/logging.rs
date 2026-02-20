@@ -31,12 +31,12 @@ impl From<u32> for LogLevel {
 }
 
 pub fn log_message(state: &HostState, level: LogLevel, message: &str) {
-    let actor_id = state.actor_id();
+    let particle_id = state.particle_id();
     match level {
-        LogLevel::Trace => tracing::trace!(actor = %actor_id, "{}", message),
-        LogLevel::Debug => tracing::debug!(actor = %actor_id, "{}", message),
-        LogLevel::Info => tracing::info!(actor = %actor_id, "{}", message),
-        LogLevel::Warn => tracing::warn!(actor = %actor_id, "{}", message),
-        LogLevel::Error => tracing::error!(actor = %actor_id, "{}", message),
+        LogLevel::Trace => tracing::trace!(particle = %particle_id, "{}", message),
+        LogLevel::Debug => tracing::debug!(particle = %particle_id, "{}", message),
+        LogLevel::Info => tracing::info!(particle = %particle_id, "{}", message),
+        LogLevel::Warn => tracing::warn!(particle = %particle_id, "{}", message),
+        LogLevel::Error => tracing::error!(particle = %particle_id, "{}", message),
     }
 }

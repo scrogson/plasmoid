@@ -2,7 +2,7 @@ use crate::doc_registry::DocRegistry;
 use crate::pid::{Pid, PidGenerator};
 use crate::policy::PolicySet;
 use crate::protocol::PlasmoidProtocol;
-use crate::registry::ProcessRegistry;
+use crate::registry::ParticleRegistry;
 use anyhow::Result;
 use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
@@ -19,12 +19,12 @@ use wasmtime::{Config, Engine};
 /// The single ALPN used for all plasmoid traffic.
 pub const PLASMOID_ALPN: &[u8] = b"plasmoid/1";
 
-/// The actor runtime - hosts WASM actors on an iroh endpoint.
-pub struct ActorRuntime {
+/// The runtime - hosts WASM component instances on an iroh endpoint.
+pub struct Runtime {
     router: Router,
     endpoint: Endpoint,
     engine: Engine,
-    registry: Arc<ProcessRegistry>,
+    registry: Arc<ParticleRegistry>,
     doc_registry: Arc<DocRegistry>,
 }
 
@@ -69,8 +69,8 @@ fn load_or_generate_secret_key(data_dir: &Path) -> Result<SecretKey> {
     }
 }
 
-impl ActorRuntime {
-    /// Create a new actor runtime with an optional data directory for persistent identity.
+impl Runtime {
+    /// Create a new runtime with an optional data directory for persistent identity.
     ///
     /// If `data_dir` is provided, the node's secret key is loaded from (or saved to)
     /// `<data_dir>/secret_key`, giving the node a stable identity across restarts.
@@ -96,7 +96,7 @@ impl ActorRuntime {
             .await?;
 
         let pid_gen = PidGenerator::new(endpoint.id());
-        let registry = Arc::new(ProcessRegistry::new(pid_gen, engine.clone()));
+        let registry = Arc::new(ParticleRegistry::new(pid_gen, engine.clone()));
 
         // Create blob store (in-memory)
         let blobs = MemStore::new();
@@ -133,7 +133,7 @@ impl ActorRuntime {
             .accept(DOCS_ALPN, docs)
             .spawn();
 
-        tracing::info!(endpoint_id = %endpoint.id(), "Actor runtime initialized");
+        tracing::info!(endpoint_id = %endpoint.id(), "Runtime initialized");
 
         Ok(Self {
             router,
@@ -164,8 +164,8 @@ impl ActorRuntime {
         &self.engine
     }
 
-    /// Get a reference to the process registry.
-    pub fn registry(&self) -> &Arc<ProcessRegistry> {
+    /// Get a reference to the particle registry.
+    pub fn registry(&self) -> &Arc<ParticleRegistry> {
         &self.registry
     }
 
@@ -181,7 +181,7 @@ impl ActorRuntime {
         Ok(())
     }
 
-    /// Load a WASM component without spawning any process.
+    /// Load a WASM component without spawning any particle.
     pub async fn load(
         &self,
         component: &str,
@@ -198,11 +198,11 @@ impl ActorRuntime {
         self.registry.list_components().await
     }
 
-    /// Deploy a WASM component and spawn one process from it.
+    /// Deploy a WASM component and spawn one particle from it.
     ///
     /// `component` is the module name (used to register the code).
-    /// `name` is an optional registered name for the spawned process.
-    /// Returns the PID of the spawned process.
+    /// `name` is an optional registered name for the spawned particle.
+    /// Returns the PID of the spawned particle.
     pub async fn deploy(
         &self,
         component: &str,
@@ -215,7 +215,7 @@ impl ActorRuntime {
         self.spawn(component, name, Some(capabilities)).await
     }
 
-    /// Spawn a new process from a registered component.
+    /// Spawn a new particle from a registered component.
     pub async fn spawn(
         &self,
         component: &str,
@@ -236,14 +236,14 @@ impl ActorRuntime {
         Ok(pid)
     }
 
-    /// Check if a process with the given name exists.
-    pub async fn has_process(&self, name: &str) -> bool {
+    /// Check if a particle with the given name exists.
+    pub async fn has_particle(&self, name: &str) -> bool {
         self.registry.get_by_name(name).await.is_some()
     }
 
     /// Wait for shutdown (ctrl+c). The Router handles accept in the background.
     pub async fn run(&self) -> Result<()> {
-        tracing::info!(node_id = %self.node_id(), "Actor runtime running");
+        tracing::info!(node_id = %self.node_id(), "Runtime running");
 
         tokio::signal::ctrl_c().await?;
         tracing::info!("Shutting down");

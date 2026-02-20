@@ -9,5 +9,5 @@ pub mod runtime;
 pub mod wire;
 
 pub use pid::Pid;
-pub use registry::ProcessRegistry;
-pub use runtime::{ActorRuntime, PLASMOID_ALPN};
+pub use registry::ParticleRegistry;
+pub use runtime::{Runtime, PLASMOID_ALPN};

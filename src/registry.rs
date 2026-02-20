@@ -7,43 +7,43 @@ use tokio::sync::RwLock;
 use wasmtime::component::Component;
 use wasmtime::Engine;
 
-/// A compiled component (WASM component) that can be spawned as processes.
+/// A compiled component (WASM component) that can be spawned as particles.
 pub struct ComponentTemplate {
     pub component: Component,
     pub default_capabilities: PolicySet,
 }
 
-/// A running process instance.
-pub struct ProcessEntry {
+/// A running particle instance.
+pub struct ParticleEntry {
     pub pid: Pid,
     pub actor: WasmActor,
     pub component_name: String,
     pub name: Option<String>,
 }
 
-/// Local process registry — manages components and running process instances.
+/// Local particle registry — manages components and running particle instances.
 ///
 /// Thread-safe: all internal state is behind RwLocks.
-pub struct ProcessRegistry {
+pub struct ParticleRegistry {
     pid_gen: PidGenerator,
     engine: Engine,
-    processes: RwLock<HashMap<Pid, ProcessEntry>>,
+    particles: RwLock<HashMap<Pid, ParticleEntry>>,
     names: RwLock<HashMap<String, Pid>>,
     components: RwLock<HashMap<String, ComponentTemplate>>,
 }
 
-impl std::fmt::Debug for ProcessRegistry {
+impl std::fmt::Debug for ParticleRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ProcessRegistry").finish_non_exhaustive()
+        f.debug_struct("ParticleRegistry").finish_non_exhaustive()
     }
 }
 
-impl ProcessRegistry {
+impl ParticleRegistry {
     pub fn new(pid_gen: PidGenerator, engine: Engine) -> Self {
         Self {
             pid_gen,
             engine,
-            processes: RwLock::new(HashMap::new()),
+            particles: RwLock::new(HashMap::new()),
             names: RwLock::new(HashMap::new()),
             components: RwLock::new(HashMap::new()),
         }
@@ -69,7 +69,7 @@ impl ProcessRegistry {
         Ok(())
     }
 
-    /// Spawn a new process from a registered component, optionally with a name.
+    /// Spawn a new particle from a registered component, optionally with a name.
     pub async fn spawn(
         &self,
         component: &str,
@@ -93,7 +93,7 @@ impl ProcessRegistry {
         let actor = WasmActor::from_component(template.component.clone(), caps);
         let pid = self.pid_gen.next();
 
-        let entry = ProcessEntry {
+        let entry = ParticleEntry {
             pid: pid.clone(),
             actor,
             component_name: component.to_string(),
@@ -101,7 +101,7 @@ impl ProcessRegistry {
         };
 
         // Insert into registries
-        self.processes.write().await.insert(pid.clone(), entry);
+        self.particles.write().await.insert(pid.clone(), entry);
         if let Some(name) = name {
             self.names
                 .write()
@@ -113,16 +113,16 @@ impl ProcessRegistry {
             pid = %pid,
             component = %component,
             name = ?name,
-            "Process spawned"
+            "Particle spawned"
         );
 
         Ok(pid)
     }
 
-    /// Look up a process by PID.
-    pub async fn get_by_pid(&self, pid: &Pid) -> Option<ProcessRef> {
-        let processes = self.processes.read().await;
-        processes.get(pid).map(|entry| ProcessRef {
+    /// Look up a particle by PID.
+    pub async fn get_by_pid(&self, pid: &Pid) -> Option<ParticleRef> {
+        let particles = self.particles.read().await;
+        particles.get(pid).map(|entry| ParticleRef {
             pid: entry.pid.clone(),
             component: entry.actor.component().clone(),
             capabilities: entry.actor.capabilities().clone(),
@@ -136,14 +136,14 @@ impl ProcessRegistry {
         self.names.read().await.get(name).cloned()
     }
 
-    /// Remove a process by PID.
-    pub async fn remove(&self, pid: &Pid) -> Option<ProcessEntry> {
-        let entry = self.processes.write().await.remove(pid);
+    /// Remove a particle by PID.
+    pub async fn remove(&self, pid: &Pid) -> Option<ParticleEntry> {
+        let entry = self.particles.write().await.remove(pid);
         if let Some(ref entry) = entry {
             if let Some(ref name) = entry.name {
                 self.names.write().await.remove(name);
             }
-            tracing::info!(pid = %pid, "Process removed");
+            tracing::info!(pid = %pid, "Particle removed");
         }
         entry
     }
@@ -158,9 +158,9 @@ impl ProcessRegistry {
             .collect()
     }
 
-    /// List all running processes.
-    pub async fn list_processes(&self) -> Vec<(Pid, String, Option<String>)> {
-        self.processes
+    /// List all running particles.
+    pub async fn list_particles(&self) -> Vec<(Pid, String, Option<String>)> {
+        self.particles
             .read()
             .await
             .values()
@@ -185,9 +185,9 @@ impl ProcessRegistry {
     }
 }
 
-/// A lightweight reference to a process (avoids holding the RwLock).
+/// A lightweight reference to a particle (avoids holding the RwLock).
 #[derive(Clone)]
-pub struct ProcessRef {
+pub struct ParticleRef {
     pub pid: Pid,
     pub component: Component,
     pub capabilities: PolicySet,
@@ -195,9 +195,9 @@ pub struct ProcessRef {
     pub name: Option<String>,
 }
 
-impl std::fmt::Debug for ProcessRef {
+impl std::fmt::Debug for ParticleRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ProcessRef")
+        f.debug_struct("ParticleRef")
             .field("pid", &self.pid)
             .field("component_name", &self.component_name)
             .field("name", &self.name)
@@ -222,12 +222,12 @@ mod tests {
         let key = SecretKey::generate(&mut rand::rng());
         let node = key.public();
         let engine = make_engine();
-        let registry = ProcessRegistry::new(PidGenerator::new(node), engine);
+        let registry = ParticleRegistry::new(PidGenerator::new(node), engine);
 
         // We can't easily create a real WASM component in a unit test,
         // so we test the name/pid bookkeeping with a real deploy flow
         // in integration tests. Here we verify the empty state.
-        assert!(registry.list_processes().await.is_empty());
+        assert!(registry.list_particles().await.is_empty());
         assert!(registry.get_by_name("echo").await.is_none());
     }
 
@@ -236,7 +236,7 @@ mod tests {
         let key = SecretKey::generate(&mut rand::rng());
         let node = key.public();
         let engine = make_engine();
-        let registry = ProcessRegistry::new(PidGenerator::new(node), engine);
+        let registry = ParticleRegistry::new(PidGenerator::new(node), engine);
 
         // Without a registered behavior, spawn should fail with "not registered"
         let result = registry.spawn("echo", Some("echo"), None).await;

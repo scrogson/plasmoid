@@ -3,7 +3,7 @@ use anyhow::Result;
 use wasmtime::component::Component;
 use wasmtime::Engine;
 
-/// A deployed WASM actor.
+/// A deployed WASM component instance.
 pub struct WasmActor {
     component: Component,
     capabilities: PolicySet,
@@ -32,7 +32,7 @@ impl WasmActor {
         &self.component
     }
 
-    /// Get the actor's capabilities.
+    /// Get the component's capabilities.
     pub fn capabilities(&self) -> &PolicySet {
         &self.capabilities
     }

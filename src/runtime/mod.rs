@@ -3,4 +3,4 @@ mod engine;
 pub(crate) mod invoke;
 
 pub use actor::WasmActor;
-pub use engine::{ActorRuntime, PLASMOID_ALPN};
+pub use engine::{Runtime, PLASMOID_ALPN};

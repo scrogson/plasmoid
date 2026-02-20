@@ -7,26 +7,26 @@ use crate::wire::{
     self, CallRequest, CallResponse, Command, CommandResponse, SpawnRequest, SpawnResult, Target,
 };
 
-/// A typed reference to an actor, enabling function calls over QUIC.
+/// A typed reference to a particle, enabling function calls over QUIC.
 ///
-/// `ActorRef` targets actors by name (or PID). All connections use the
+/// `ParticleRef` targets particles by name (or PID). All connections use the
 /// single `PLASMOID_ALPN` protocol, with target addressing in the request.
-pub struct ActorRef {
+pub struct ParticleRef {
     endpoint: Endpoint,
-    target: ActorTarget,
+    target: ParticleTarget,
     next_id: AtomicU64,
 }
 
-enum ActorTarget {
-    /// Remote actor at a known address.
+enum ParticleTarget {
+    /// Remote particle at a known address.
     Remote {
         addr: EndpointAddr,
         name: String,
     },
 }
 
-impl ActorRef {
-    /// Create a reference to a remote actor by name at the given endpoint address.
+impl ParticleRef {
+    /// Create a reference to a remote particle by name at the given endpoint address.
     pub fn remote_by_name(
         endpoint: Endpoint,
         name: &str,
@@ -34,7 +34,7 @@ impl ActorRef {
     ) -> Self {
         Self {
             endpoint,
-            target: ActorTarget::Remote {
+            target: ParticleTarget::Remote {
                 addr: addr.into(),
                 name: name.to_string(),
             },
@@ -42,16 +42,16 @@ impl ActorRef {
         }
     }
 
-    /// Call a function on the actor and return the results.
+    /// Call a function on the particle and return the results.
     pub async fn call(&self, function: &str, args: &[&str]) -> Result<Vec<String>> {
         let response = self.send_request(function, args).await?;
 
         response
             .result
-            .map_err(|e| anyhow::anyhow!("actor returned error: {}", e))
+            .map_err(|e| anyhow::anyhow!("particle returned error: {}", e))
     }
 
-    /// Send a notification to the actor (fire-and-forget).
+    /// Send a notification to the particle (fire-and-forget).
     pub async fn notify(&self, function: &str, args: &[&str]) -> Result<()> {
         let _ = self.send_request(function, args).await?;
         Ok(())
@@ -62,7 +62,7 @@ impl ActorRef {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
 
         let (addr, wire_target) = match &self.target {
-            ActorTarget::Remote { addr, name } => {
+            ParticleTarget::Remote { addr, name } => {
                 (addr.clone(), Target::Name(name.clone()))
             }
         };
@@ -82,7 +82,7 @@ impl ActorRef {
             .endpoint
             .connect(addr, PLASMOID_ALPN)
             .await
-            .context("failed to connect to actor")?;
+            .context("failed to connect to particle")?;
 
         let (mut send, mut recv) = conn
             .open_bi()
@@ -107,7 +107,7 @@ impl ActorRef {
     }
 }
 
-/// A client for node-level operations (spawn, not targeted at a specific process).
+/// A client for node-level operations (spawn, not targeted at a specific particle).
 pub struct NodeClient {
     endpoint: Endpoint,
     addr: EndpointAddr,
@@ -121,7 +121,7 @@ impl NodeClient {
         }
     }
 
-    /// Spawn a process on the remote node from a registered component.
+    /// Spawn a particle on the remote node from a registered component.
     pub async fn spawn(
         &self,
         component: &str,

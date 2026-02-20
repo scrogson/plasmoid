@@ -1,7 +1,7 @@
-use plasmoid::ActorRuntime;
+use plasmoid::Runtime;
 
 #[tokio::test]
 async fn test_runtime_creation() {
-    let runtime = ActorRuntime::new(None).await.unwrap();
-    assert!(!runtime.has_process("test").await);
+    let runtime = Runtime::new(None).await.unwrap();
+    assert!(!runtime.has_particle("test").await);
 }

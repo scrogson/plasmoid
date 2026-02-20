@@ -1,13 +1,13 @@
-//! WASM actor invocation module.
+//! WASM component invocation module.
 //!
 //! This module handles instantiating WASM components and invoking their
 //! exported functions with dynamic dispatch using wasm-wave typed values.
 
-use crate::doc_registry::{DocRegistry, ResolvedProcess};
+use crate::doc_registry::{DocRegistry, ResolvedParticle};
 use crate::host::{log_message, HostState, LogLevel};
 use crate::pid::Pid;
 use crate::policy::PolicySet;
-use crate::registry::ProcessRegistry;
+use crate::registry::ParticleRegistry;
 use crate::runtime::PLASMOID_ALPN;
 use crate::wire;
 use anyhow::{anyhow, Result};
@@ -17,23 +17,23 @@ use wasmtime::component::types::ComponentItem;
 use wasmtime::component::{Component, Linker, Type, Val};
 use wasmtime::Engine;
 
-/// Invoke a function on a WASM actor component.
-pub fn invoke_actor(
+/// Invoke a function on a WASM component instance.
+pub fn invoke_component(
     engine: &Engine,
     component: &Component,
     capabilities: &PolicySet,
-    actor_id: &str,
+    particle_id: &str,
     pid: Option<Pid>,
     remote_node_id: Option<String>,
     function: &str,
     args: &[String],
     endpoint: Option<&Endpoint>,
-    registry: Option<Arc<ProcessRegistry>>,
+    registry: Option<Arc<ParticleRegistry>>,
     doc_registry: Option<Arc<DocRegistry>>,
 ) -> Result<Vec<String>> {
     // Create host state for this invocation
-    let mut state = HostState::new(actor_id.to_string(), capabilities.clone());
-    state.set_actor_name(Some(actor_id.to_string()));
+    let mut state = HostState::new(particle_id.to_string(), capabilities.clone());
+    state.set_particle_name(Some(particle_id.to_string()));
     state.set_pid(pid);
     state.set_remote_node_id(remote_node_id);
     state.set_endpoint(endpoint.cloned());
@@ -58,7 +58,7 @@ pub fn invoke_actor(
         find_function_in_exports(engine, component, &instance, &mut store, function)?
     };
 
-    tracing::debug!(function = %function, "Invoking actor function");
+    tracing::debug!(function = %function, "Invoking component function");
 
     // Get the function's type to determine parameter and result types
     let func_ty = func.ty(&store);
@@ -224,7 +224,7 @@ fn add_host_functions(linker: &mut Linker<HostState>, capabilities: &PolicySet) 
              -> Result<(String,), _> {
                 let id = match caller.data().pid() {
                     Some(pid) => pid.to_string(),
-                    None => caller.data().actor_id().to_string(),
+                    None => caller.data().particle_id().to_string(),
                 };
                 Ok((id,))
             },
@@ -236,7 +236,7 @@ fn add_host_functions(linker: &mut Linker<HostState>, capabilities: &PolicySet) 
             |caller: wasmtime::StoreContextMut<'_, HostState>,
              _: ()|
              -> Result<(Option<String>,), _> {
-                let name = caller.data().actor_name().map(|s| s.to_string());
+                let name = caller.data().particle_name().map(|s| s.to_string());
                 Ok((name,))
             },
         )?;
@@ -297,7 +297,7 @@ fn add_host_functions(linker: &mut Linker<HostState>, capabilities: &PolicySet) 
                 let registry = caller.data().registry().cloned();
                 let doc_registry = caller.data().doc_registry().cloned();
                 let endpoint = caller.data().endpoint().cloned();
-                let caller_id = caller.data().actor_id().to_string();
+                let caller_id = caller.data().particle_id().to_string();
 
                 let result = dispatch_call(
                     &engine,
@@ -337,7 +337,7 @@ fn add_host_functions(linker: &mut Linker<HostState>, capabilities: &PolicySet) 
                 let registry = caller.data().registry().cloned();
                 let doc_registry = caller.data().doc_registry().cloned();
                 let endpoint = caller.data().endpoint().cloned();
-                let caller_id = caller.data().actor_id().to_string();
+                let caller_id = caller.data().particle_id().to_string();
 
                 let result = dispatch_call(
                     &engine,
@@ -364,12 +364,12 @@ fn add_host_functions(linker: &mut Linker<HostState>, capabilities: &PolicySet) 
 /// Dispatch a call: resolve the target locally or remotely.
 ///
 /// 1. Check local registry by name
-/// 2. If doc registry exists, check for remote processes
+/// 2. If doc registry exists, check for remote particles
 /// 3. Local -> direct WASM invocation
 /// 4. Remote -> QUIC call to remote node
 fn dispatch_call(
     engine: &Engine,
-    registry: Option<&Arc<ProcessRegistry>>,
+    registry: Option<&Arc<ParticleRegistry>>,
     doc_registry: Option<&Arc<DocRegistry>>,
     endpoint: Option<&Endpoint>,
     caller_id: &str,
@@ -382,13 +382,13 @@ fn dispatch_call(
     // Try local resolution first
     if let Some(registry) = registry {
         if let Some(pid) = rt.block_on(registry.get_by_name(target)) {
-            if let Some(process) = rt.block_on(registry.get_by_pid(&pid)) {
-                return invoke_actor(
+            if let Some(particle) = rt.block_on(registry.get_by_pid(&pid)) {
+                return invoke_component(
                     engine,
-                    &process.component,
-                    &process.capabilities,
-                    &process.name.unwrap_or_else(|| process.pid.to_string()),
-                    Some(process.pid),
+                    &particle.component,
+                    &particle.capabilities,
+                    &particle.name.unwrap_or_else(|| particle.pid.to_string()),
+                    Some(particle.pid),
                     Some(caller_id.to_string()),
                     function,
                     args,
@@ -404,16 +404,16 @@ fn dispatch_call(
     if let Some(doc_registry) = doc_registry {
         if let Some(resolved) = rt.block_on(doc_registry.resolve_name(target)) {
             match resolved {
-                ResolvedProcess::Local(pid) => {
+                ResolvedParticle::Local(pid) => {
                     // Shouldn't happen (we checked local first), but handle it
                     if let Some(registry) = registry {
-                        if let Some(process) = rt.block_on(registry.get_by_pid(&pid)) {
-                            return invoke_actor(
+                        if let Some(particle) = rt.block_on(registry.get_by_pid(&pid)) {
+                            return invoke_component(
                                 engine,
-                                &process.component,
-                                &process.capabilities,
-                                &process.name.unwrap_or_else(|| process.pid.to_string()),
-                                Some(process.pid),
+                                &particle.component,
+                                &particle.capabilities,
+                                &particle.name.unwrap_or_else(|| particle.pid.to_string()),
+                                Some(particle.pid),
                                 Some(caller_id.to_string()),
                                 function,
                                 args,
@@ -424,10 +424,10 @@ fn dispatch_call(
                         }
                     }
                 }
-                ResolvedProcess::Remote(remote) => {
+                ResolvedParticle::Remote(remote) => {
                     let endpoint = endpoint
                         .ok_or_else(|| anyhow!("no endpoint available for remote call"))?;
-                    return remote_actor_call(
+                    return remote_call(
                         endpoint,
                         &remote,
                         target,
@@ -439,13 +439,13 @@ fn dispatch_call(
         }
     }
 
-    Err(anyhow!("no process found with name '{}'", target))
+    Err(anyhow!("no particle found with name '{}'", target))
 }
 
-/// Perform a remote actor call via QUIC.
-fn remote_actor_call(
+/// Perform a remote call via QUIC.
+fn remote_call(
     endpoint: &Endpoint,
-    remote: &crate::doc_registry::RemoteProcess,
+    remote: &crate::doc_registry::RemoteParticle,
     target: &str,
     function: &str,
     args: &[String],
@@ -484,7 +484,7 @@ fn remote_actor_call(
         match response {
             wire::CommandResponse::Call(call_response) => call_response
                 .result
-                .map_err(|e| anyhow!("remote actor error: {}", e)),
+                .map_err(|e| anyhow!("particle returned error: {}", e)),
             other => Err(anyhow!("unexpected response type: expected Call, got {:?}", other)),
         }
     })
