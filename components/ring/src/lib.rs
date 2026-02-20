@@ -50,6 +50,11 @@ impl Guest for Ring {
         let _msg = actor_context::receive();
         let elapsed = start.elapsed();
 
+        // Shut down all ring particles — they're blocked on receive()
+        for pid in &pids {
+            let _ = actor_context::send(pid, &["stop".to_string()]);
+        }
+
         let total = num_processes as u64 * num_messages as u64;
         let rate = if elapsed.as_secs_f64() > 0.0 {
             total as f64 / elapsed.as_secs_f64()
@@ -71,8 +76,7 @@ impl Guest for Ring {
         loop {
             let msg = actor_context::receive();
 
-            if msg.is_empty() {
-                logging::log(logging::Level::Error, "received empty message");
+            if msg.is_empty() || msg[0] == "stop" {
                 return;
             }
 
@@ -91,7 +95,9 @@ impl Guest for Ring {
 
             if hops == 0 {
                 let _ = actor_context::send(master, &["finished".to_string()]);
-                return;
+                // Don't return — wait for "stop" from orchestrator so we
+                // release the blocking thread cleanly.
+                continue;
             }
 
             let _ = actor_context::send(
