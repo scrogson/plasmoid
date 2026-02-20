@@ -356,6 +356,61 @@ fn add_host_functions(linker: &mut Linker<HostState>, capabilities: &PolicySet) 
                 }
             },
         )?;
+
+        // send: func(target: string, message: list<string>) -> result<_, string>
+        context.func_wrap(
+            "send",
+            |caller: wasmtime::StoreContextMut<'_, HostState>,
+             (target, message): (String, Vec<String>)|
+             -> Result<(Result<(), String>,), _> {
+                if !caller.data().capabilities().allows("actor:send") {
+                    return Ok((Err("unauthorized: actor:send not permitted".to_string()),));
+                }
+
+                let registry = match caller.data().registry() {
+                    Some(r) => r.clone(),
+                    None => {
+                        return Ok((Err("no registry available for send".to_string()),));
+                    }
+                };
+
+                let rt = tokio::runtime::Handle::current();
+                let result = rt.block_on(registry.send_message(&target, message));
+
+                match result {
+                    Ok(()) => Ok((Ok(()),)),
+                    Err(e) => Ok((Err(e.to_string()),)),
+                }
+            },
+        )?;
+
+        // receive: func() -> list<string>
+        context.func_wrap(
+            "receive",
+            |caller: wasmtime::StoreContextMut<'_, HostState>,
+             _: ()|
+             -> Result<(Vec<String>,), _> {
+                let pid = match caller.data().pid() {
+                    Some(pid) => pid.clone(),
+                    None => {
+                        return Ok((vec!["error: no mailbox (particle not spawned)".to_string()],));
+                    }
+                };
+
+                let registry = match caller.data().registry() {
+                    Some(r) => r.clone(),
+                    None => {
+                        return Ok((vec!["error: no registry available".to_string()],));
+                    }
+                };
+
+                let rt = tokio::runtime::Handle::current();
+                match rt.block_on(registry.receive_message(&pid)) {
+                    Ok(msg) => Ok((msg,)),
+                    Err(e) => Ok((vec![format!("error: {}", e)],)),
+                }
+            },
+        )?;
     }
 
     Ok(())
@@ -393,8 +448,8 @@ fn dispatch_call(
                     function,
                     args,
                     endpoint,
-                    None, // don't pass registry to avoid recursive borrow issues
-                    None,
+                    Some(registry.clone()),
+                    doc_registry.map(|r| r.clone()),
                 );
             }
         }
@@ -418,8 +473,8 @@ fn dispatch_call(
                                 function,
                                 args,
                                 endpoint,
-                                None,
-                                None,
+                                Some(registry.clone()),
+                                Some(doc_registry.clone()),
                             );
                         }
                     }

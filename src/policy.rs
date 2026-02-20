@@ -28,6 +28,8 @@ impl PolicySet {
             "logging",
             "actor:call",
             "actor:notify",
+            "actor:send",
+            "actor:receive",
             "db:read",
             "db:write",
         ])
