@@ -384,6 +384,12 @@ interface actor-context {
 
     /// Spawn a new process from a registered behavior.
     spawn: func(behavior: string, name: option<string>) -> result<string, string>;
+
+    /// Deposit a message into a particle's mailbox. Fire-and-forget.
+    send: func(target: string, message: list<string>) -> result<_, string>;
+
+    /// Block until a message arrives in this particle's mailbox.
+    receive: func() -> list<string>;
 }
 "#;
 
