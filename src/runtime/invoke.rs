@@ -330,7 +330,9 @@ fn add_host_functions(linker: &mut Linker<HostState>, capabilities: &PolicySet) 
                 let engine = match caller.data().engine() {
                     Some(e) => e.clone(),
                     None => {
-                        return Ok((Err("no engine available for actor-to-actor calls".to_string()),));
+                        return Ok((Err(
+                            "no engine available for actor-to-actor calls".to_string(),
+                        ),));
                     }
                 };
 
@@ -339,21 +341,35 @@ fn add_host_functions(linker: &mut Linker<HostState>, capabilities: &PolicySet) 
                 let endpoint = caller.data().endpoint().cloned();
                 let caller_id = caller.data().particle_id().to_string();
 
-                let result = dispatch_call(
-                    &engine,
-                    registry.as_ref(),
-                    doc_registry.as_ref(),
-                    endpoint.as_ref(),
-                    &caller_id,
-                    &target,
-                    &function,
-                    &args,
-                );
+                // Fire-and-forget: spawn a background task for the invocation
+                let rt = tokio::runtime::Handle::current();
+                rt.spawn(async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        dispatch_call(
+                            &engine,
+                            registry.as_ref(),
+                            doc_registry.as_ref(),
+                            endpoint.as_ref(),
+                            &caller_id,
+                            &target,
+                            &function,
+                            &args,
+                        )
+                    })
+                    .await;
 
-                match result {
-                    Ok(_) => Ok((Ok(()),)),
-                    Err(e) => Ok((Err(e.to_string()),)),
-                }
+                    match result {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(e)) => {
+                            tracing::warn!(error = %e, "notify dispatch failed");
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "notify task panicked");
+                        }
+                    }
+                });
+
+                Ok((Ok(()),))
             },
         )?;
 
