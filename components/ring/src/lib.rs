@@ -8,15 +8,7 @@ struct Ring;
 
 impl Guest for Ring {
     fn run(num_processes: u32, num_messages: u32) -> String {
-        // Use name (not PID) as the master identity — PID strings can't be
-        // resolved by send_message because Pid::from_str can't reconstruct
-        // the full EndpointId from a prefix.
-        let self_name = match actor_context::self_name() {
-            Some(name) => name,
-            None => {
-                return "Error: orchestrator particle has no name".to_string();
-            }
-        };
+        let self_pid = actor_context::self_pid();
 
         logging::log(
             logging::Level::Info,
@@ -26,35 +18,31 @@ impl Guest for Ring {
             ),
         );
 
-        // Spawn N particles
-        for i in 0..num_processes {
-            let name = format!("ring-{}", i);
-            match actor_context::spawn("ring", Some(&name)) {
-                Ok(pid) => {
-                    logging::log(
-                        logging::Level::Debug,
-                        &format!("Spawned {} (pid: {})", name, pid),
-                    );
-                }
-                Err(e) => {
-                    return format!("Error spawning {}: {}", name, e);
-                }
+        // Spawn N unnamed particles, collect their PIDs
+        let mut pids = Vec::new();
+        for _ in 0..num_processes {
+            match actor_context::spawn("ring", None) {
+                Ok(pid) => pids.push(pid),
+                Err(e) => return format!("Error spawning: {}", e),
             }
         }
 
-        // Start each particle's receive loop (fire-and-forget via notify)
-        for i in 0..num_processes {
-            let name = format!("ring-{}", i);
-            if let Err(e) = actor_context::notify(&name, "start", &[num_processes.to_string()]) {
-                return format!("Error starting {}: {}", name, e);
+        // Start each particle's receive loop, telling it who its next neighbor is.
+        // Particle i forwards to particle (i+1) % n.
+        // Note: notify args are wave-encoded; strings must be quoted.
+        for i in 0..num_processes as usize {
+            let next = &pids[(i + 1) % pids.len()];
+            let next_wave = format!("\"{}\"", next);
+            if let Err(e) = actor_context::notify(&pids[i], "start", &[next_wave]) {
+                return format!("Error starting particle: {}", e);
             }
         }
 
         let start = std::time::Instant::now();
 
         // Send initial message to the last particle
-        let last = format!("ring-{}", num_processes - 1);
-        if let Err(e) = actor_context::send(&last, &[num_messages.to_string(), self_name]) {
+        let last = &pids[pids.len() - 1];
+        if let Err(e) = actor_context::send(last, &[num_messages.to_string(), self_pid]) {
             return format!("Error sending initial message: {}", e);
         }
 
@@ -79,38 +67,7 @@ impl Guest for Ring {
         )
     }
 
-    fn start(num_processes: u32) {
-        let my_name = match actor_context::self_name() {
-            Some(name) => name,
-            None => {
-                logging::log(logging::Level::Error, "ring particle has no name");
-                return;
-            }
-        };
-
-        let my_index: u32 = match my_name.strip_prefix("ring-") {
-            Some(s) => match s.parse() {
-                Ok(i) => i,
-                Err(_) => {
-                    logging::log(
-                        logging::Level::Error,
-                        &format!("bad ring name: {}", my_name),
-                    );
-                    return;
-                }
-            },
-            None => {
-                logging::log(
-                    logging::Level::Error,
-                    &format!("unexpected name: {}", my_name),
-                );
-                return;
-            }
-        };
-
-        let next_index = (my_index + 1) % num_processes;
-        let next_name = format!("ring-{}", next_index);
-
+    fn start(next_pid: String) {
         loop {
             let msg = actor_context::receive();
 
@@ -133,14 +90,12 @@ impl Guest for Ring {
             let master = if msg.len() > 1 { &msg[1] } else { return };
 
             if hops == 0 {
-                // Done -- notify the orchestrator
                 let _ = actor_context::send(master, &["finished".to_string()]);
                 return;
             }
 
-            // Forward to next particle
             let _ = actor_context::send(
-                &next_name,
+                &next_pid,
                 &[(hops - 1).to_string(), master.to_string()],
             );
         }

@@ -450,9 +450,9 @@ fn dispatch_call(
 ) -> Result<Vec<String>> {
     let rt = tokio::runtime::Handle::current();
 
-    // Try local resolution first
+    // Try local resolution first (by name or PID string)
     if let Some(registry) = registry {
-        if let Some(pid) = rt.block_on(registry.get_by_name(target)) {
+        if let Some(pid) = rt.block_on(registry.resolve_target(target)) {
             if let Some(particle) = rt.block_on(registry.get_by_pid(&pid)) {
                 return invoke_component(
                     engine,

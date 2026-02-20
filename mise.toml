@@ -59,3 +59,28 @@ plasmoid start --data-dir ~/.config/plasmoid/node-b --load-path target/debug \
   --peer $(cat ~/.config/plasmoid/node-a/node_id) \
   --spawn caller_actor --name caller
 """
+
+[tasks."build:ring"]
+description = "Build the ring WASM component"
+dir = "components/ring"
+run = """
+cargo component build --release
+cp target/wasm32-wasip1/release/ring.wasm ../../target/debug/
+"""
+
+[tasks."ring:node"]
+description = "Start a node with the ring component"
+depends = ["build", "build:ring"]
+run = """
+plasmoid start target/debug/ring.wasm --spawn ring --name ring-bench
+"""
+
+[tasks."ring:run"]
+description = "Run the ring benchmark (usage: mise run ring:run -- <processes> <messages>)"
+run = """
+#!/usr/bin/env bash
+N="${1:-100}"
+M="${2:-100}"
+NODE_ID=$(cat ~/.config/plasmoid/node_id)
+PLASMOID_NODE="$NODE_ID" plasmoid call ring-bench run "$N" "$M"
+"""

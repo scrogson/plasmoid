@@ -205,15 +205,31 @@ impl ParticleRegistry {
         &self.engine
     }
 
+    /// Resolve a target string to a PID — tries name lookup first, then
+    /// matches against PID display strings (e.g. `<abc123.1>`).
+    pub async fn resolve_target(&self, target: &str) -> Option<Pid> {
+        // Try name first
+        if let Some(pid) = self.get_by_name(target).await {
+            return Some(pid);
+        }
+
+        // Try matching PID display string against registered particles
+        let mailboxes = self.mailboxes.read().await;
+        for pid in mailboxes.keys() {
+            if pid.to_string() == target {
+                return Some(pid.clone());
+            }
+        }
+
+        None
+    }
+
     /// Send a message to a particle's mailbox by name or PID string.
     pub async fn send_message(&self, target: &str, message: Vec<String>) -> Result<()> {
-        let pid = if let Some(pid) = self.get_by_name(target).await {
-            pid
-        } else if let Ok(pid) = target.parse::<Pid>() {
-            pid
-        } else {
-            return Err(anyhow!("no particle found with name or PID '{}'", target));
-        };
+        let pid = self
+            .resolve_target(target)
+            .await
+            .ok_or_else(|| anyhow!("no particle found with name or PID '{}'", target))?;
 
         let mailboxes = self.mailboxes.read().await;
         let handle = mailboxes

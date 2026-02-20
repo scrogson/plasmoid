@@ -5,7 +5,8 @@ interface ring {
     run: func(num-processes: u32, num-messages: u32) -> string;
 
     /// Ring node receive loop. Started via notify.
-    start: func(num-processes: u32);
+    /// next-pid is the PID of the next particle in the ring.
+    start: func(next-pid: string);
 }
 
 world ring-world {
