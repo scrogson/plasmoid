@@ -3,11 +3,17 @@ use iroh::EndpointId;
 use plasmoid::client::{ParticleRef, NodeClient};
 use plasmoid::policy::PolicySet;
 use plasmoid::Runtime;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing_subscriber::EnvFilter;
 
 const USAGE: &str = "\
 Usage:
+  plasmoid new <app-name>
+      Create a new application workspace.
+
+  plasmoid component new <name>
+      Create a new component in the current application.
+
   plasmoid start [options] [<wasm-file> ...]
       Boot node, load WASM components. No auto-spawning unless --spawn is used.
 
@@ -46,6 +52,11 @@ async fn main() -> Result<()> {
 
     let subcmd = args.get(1).map(|s| s.as_str());
     match subcmd {
+        Some("new") => cmd_new(&args[2..]),
+        Some("component") => match args.get(2).map(|s| s.as_str()) {
+            Some("new") => cmd_component_new(&args[3..]),
+            _ => bail!("usage: plasmoid component new <name>"),
+        },
         Some("start") => cmd_start(&args[2..]).await,
         Some("spawn") => cmd_spawn(&args[2..]).await,
         Some("call") => cmd_call(&args[2..]).await,
@@ -59,7 +70,7 @@ async fn main() -> Result<()> {
         }
         _ => {
             eprint!("{USAGE}");
-            bail!("expected subcommand: start, spawn, or call");
+            bail!("expected subcommand: new, component, start, spawn, or call");
         }
     }
 }
@@ -333,6 +344,271 @@ async fn cmd_call(args: &[String]) -> Result<()> {
     for result in &results {
         println!("{result}");
     }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Scaffolding commands
+// ---------------------------------------------------------------------------
+
+const RUNTIME_WIT: &str = r#"package plasmoid:runtime@0.2.0;
+
+interface logging {
+    enum level {
+        trace,
+        debug,
+        info,
+        warn,
+        error,
+    }
+
+    log: func(level: level, message: string);
+}
+
+interface actor-context {
+    /// Get this process's PID (e.g. "<a3f7bc12.1>")
+    self-pid: func() -> string;
+
+    /// Get this process's registered name, if any
+    self-name: func() -> option<string>;
+
+    /// Get the caller's PID, if known
+    caller-pid: func() -> option<string>;
+
+    /// Call a function on another process by name or PID and await the response.
+    call: func(target: string, function: string, args: list<string>) -> result<list<string>, string>;
+
+    /// Send a message to another process with no response.
+    notify: func(target: string, function: string, args: list<string>) -> result<_, string>;
+
+    /// Spawn a new process from a registered behavior.
+    spawn: func(behavior: string, name: option<string>) -> result<string, string>;
+}
+"#;
+
+/// Convert a kebab-case name to PascalCase.
+/// "order-service" -> "OrderService", "echo" -> "Echo"
+fn to_pascal_case(name: &str) -> String {
+    name.split('-')
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(c) => c.to_uppercase().to_string() + chars.as_str(),
+            }
+        })
+        .collect()
+}
+
+/// Validate a name for use as a crate/component name.
+fn validate_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        bail!("name cannot be empty");
+    }
+    let first = name.chars().next().unwrap();
+    if !first.is_ascii_lowercase() {
+        bail!("name must start with a lowercase letter");
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        bail!("name must contain only lowercase letters, digits, and hyphens");
+    }
+    if name.ends_with('-') {
+        bail!("name must not end with a hyphen");
+    }
+    Ok(())
+}
+
+/// Find the workspace root by walking up from the current directory.
+fn find_workspace_root() -> Result<PathBuf> {
+    let mut dir = std::env::current_dir()?;
+    loop {
+        let cargo_toml = dir.join("Cargo.toml");
+        if cargo_toml.exists() {
+            let content = std::fs::read_to_string(&cargo_toml)?;
+            if content.contains("[workspace]") {
+                return Ok(dir);
+            }
+        }
+        if !dir.pop() {
+            bail!("not inside a plasmoid application (no workspace Cargo.toml found)");
+        }
+    }
+}
+
+fn cmd_new(args: &[String]) -> Result<()> {
+    let app_name = args
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("usage: plasmoid new <app-name>"))?;
+
+    validate_name(app_name)?;
+
+    let root = Path::new(app_name);
+    if root.exists() {
+        bail!("directory '{}' already exists", app_name);
+    }
+
+    // Create directory structure
+    std::fs::create_dir_all(root.join("wit/components/deps/runtime"))?;
+    std::fs::create_dir_all(root.join("components"))?;
+
+    // Cargo.toml
+    let cargo_toml = format!(
+        r#"[workspace]
+members = ["components/*"]
+resolver = "2"
+"#
+    );
+    std::fs::write(root.join("Cargo.toml"), cargo_toml)?;
+
+    // wit/world.wit
+    std::fs::write(root.join("wit/world.wit"), RUNTIME_WIT)?;
+
+    // wit/components/deps/runtime/world.wit (copy)
+    std::fs::write(
+        root.join("wit/components/deps/runtime/world.wit"),
+        RUNTIME_WIT,
+    )?;
+
+    // components/.gitkeep
+    std::fs::write(root.join("components/.gitkeep"), "")?;
+
+    println!(r#"Created application "{app_name}""#);
+    println!();
+    println!("  {app_name}/Cargo.toml");
+    println!("  {app_name}/wit/world.wit");
+    println!("  {app_name}/wit/components/deps/runtime/world.wit");
+    println!("  {app_name}/components/");
+    println!();
+    println!("Next: cd {app_name} && plasmoid component new <name>");
+
+    Ok(())
+}
+
+fn cmd_component_new(args: &[String]) -> Result<()> {
+    let name = args
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("usage: plasmoid component new <name>"))?;
+
+    validate_name(name)?;
+
+    let workspace = find_workspace_root()?;
+
+    // Derive namespace from workspace directory name
+    let namespace = workspace
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| anyhow::anyhow!("cannot determine app namespace from workspace path"))?
+        .to_string();
+
+    // Verify this is a plasmoid app
+    let runtime_wit = workspace.join("wit/components/deps/runtime/world.wit");
+    if !runtime_wit.exists() {
+        bail!("not a plasmoid application (missing wit/components/deps/runtime/world.wit)");
+    }
+
+    // Check component doesn't already exist
+    let component_dir = workspace.join("components").join(name);
+    if component_dir.exists() {
+        bail!("component '{}' already exists", name);
+    }
+
+    let name_underscored = name.replace('-', "_");
+    let namespace_underscored = namespace.replace('-', "_");
+    let pascal_name = to_pascal_case(name);
+
+    // Create directories
+    std::fs::create_dir_all(component_dir.join("src"))?;
+    std::fs::create_dir_all(
+        workspace
+            .join("wit/components")
+            .join(name)
+            .join("deps/runtime"),
+    )?;
+
+    // components/<name>/Cargo.toml
+    let cargo_toml = format!(
+        r#"[package]
+name = "{name}"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen-rt = "0.41"
+
+[package.metadata.component]
+package = "{namespace}:{name}"
+
+[package.metadata.component.target]
+path = "../../wit/components/{name}"
+world = "{name}"
+
+[package.metadata.component.target.dependencies]
+"plasmoid:runtime" = {{ path = "../../wit/components/{name}/deps/runtime" }}
+"#
+    );
+    std::fs::write(component_dir.join("Cargo.toml"), cargo_toml)?;
+
+    // components/<name>/src/lib.rs
+    let lib_rs = format!(
+        r#"#[allow(warnings)]
+mod bindings;
+
+use bindings::exports::{namespace_underscored}::{name_underscored}::{name_underscored}::Guest;
+use bindings::plasmoid::runtime::logging;
+
+struct {pascal_name};
+
+impl Guest for {pascal_name} {{
+    fn handle(message: String) -> String {{
+        logging::log(logging::Level::Info, &format!("received: {{message}}"));
+        message
+    }}
+}}
+
+bindings::export!({pascal_name} with_types_in bindings);
+"#
+    );
+    std::fs::write(component_dir.join("src/lib.rs"), lib_rs)?;
+
+    // wit/components/<name>/<name>.wit
+    let component_wit = format!(
+        r#"package {namespace}:{name}@0.1.0;
+
+interface {name} {{
+    /// Handle a request
+    handle: func(message: string) -> string;
+}}
+
+world {name} {{
+    export {name};
+
+    import plasmoid:runtime/logging@0.2.0;
+    import plasmoid:runtime/actor-context@0.2.0;
+}}
+"#
+    );
+    let wit_dir = workspace.join("wit/components").join(name);
+    std::fs::write(wit_dir.join(format!("{name}.wit")), component_wit)?;
+
+    // wit/components/<name>/deps/runtime/world.wit (copy from workspace)
+    let runtime_content = std::fs::read_to_string(&runtime_wit)?;
+    std::fs::write(wit_dir.join("deps/runtime/world.wit"), runtime_content)?;
+
+    println!(r#"Created component "{name}" in app "{namespace}""#);
+    println!();
+    println!("  components/{name}/Cargo.toml");
+    println!("  components/{name}/src/lib.rs");
+    println!("  wit/components/{name}/{name}.wit");
+    println!("  wit/components/{name}/deps/runtime/world.wit");
+    println!();
+    println!("Build: cargo component build -p {name} --release");
 
     Ok(())
 }
