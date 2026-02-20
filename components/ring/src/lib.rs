@@ -8,7 +8,15 @@ struct Ring;
 
 impl Guest for Ring {
     fn run(num_processes: u32, num_messages: u32) -> String {
-        let self_pid = actor_context::self_pid();
+        // Use name (not PID) as the master identity — PID strings can't be
+        // resolved by send_message because Pid::from_str can't reconstruct
+        // the full EndpointId from a prefix.
+        let self_name = match actor_context::self_name() {
+            Some(name) => name,
+            None => {
+                return "Error: orchestrator particle has no name".to_string();
+            }
+        };
 
         logging::log(
             logging::Level::Info,
@@ -46,7 +54,7 @@ impl Guest for Ring {
 
         // Send initial message to the last particle
         let last = format!("ring-{}", num_processes - 1);
-        if let Err(e) = actor_context::send(&last, &[num_messages.to_string(), self_pid]) {
+        if let Err(e) = actor_context::send(&last, &[num_messages.to_string(), self_name]) {
             return format!("Error sending initial message: {}", e);
         }
 
