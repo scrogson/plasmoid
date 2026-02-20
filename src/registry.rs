@@ -3,7 +3,8 @@ use crate::policy::PolicySet;
 use crate::runtime::WasmActor;
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
-use tokio::sync::RwLock;
+use std::sync::Arc;
+use tokio::sync::{mpsc, RwLock};
 use wasmtime::component::Component;
 use wasmtime::Engine;
 
@@ -21,6 +22,12 @@ pub struct ParticleEntry {
     pub name: Option<String>,
 }
 
+/// Per-particle mailbox handle.
+pub struct MailboxHandle {
+    pub tx: mpsc::UnboundedSender<Vec<String>>,
+    rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<Vec<String>>>>,
+}
+
 /// Local particle registry — manages components and running particle instances.
 ///
 /// Thread-safe: all internal state is behind RwLocks.
@@ -28,8 +35,9 @@ pub struct ParticleRegistry {
     pid_gen: PidGenerator,
     engine: Engine,
     particles: RwLock<HashMap<Pid, ParticleEntry>>,
-    names: RwLock<HashMap<String, Pid>>,
+    pub(crate) names: RwLock<HashMap<String, Pid>>,
     components: RwLock<HashMap<String, ComponentTemplate>>,
+    pub(crate) mailboxes: RwLock<HashMap<Pid, MailboxHandle>>,
 }
 
 impl std::fmt::Debug for ParticleRegistry {
@@ -46,6 +54,7 @@ impl ParticleRegistry {
             particles: RwLock::new(HashMap::new()),
             names: RwLock::new(HashMap::new()),
             components: RwLock::new(HashMap::new()),
+            mailboxes: RwLock::new(HashMap::new()),
         }
     }
 
@@ -102,6 +111,17 @@ impl ParticleRegistry {
 
         // Insert into registries
         self.particles.write().await.insert(pid.clone(), entry);
+
+        // Create mailbox for the new particle
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.mailboxes.write().await.insert(
+            pid.clone(),
+            MailboxHandle {
+                tx,
+                rx: Arc::new(tokio::sync::Mutex::new(rx)),
+            },
+        );
+
         if let Some(name) = name {
             self.names
                 .write()
@@ -143,6 +163,7 @@ impl ParticleRegistry {
             if let Some(ref name) = entry.name {
                 self.names.write().await.remove(name);
             }
+            self.mailboxes.write().await.remove(pid);
             tracing::info!(pid = %pid, "Particle removed");
         }
         entry
@@ -182,6 +203,42 @@ impl ParticleRegistry {
     /// Get the engine reference.
     pub fn engine(&self) -> &Engine {
         &self.engine
+    }
+
+    /// Send a message to a particle's mailbox by name or PID string.
+    pub async fn send_message(&self, target: &str, message: Vec<String>) -> Result<()> {
+        let pid = if let Some(pid) = self.get_by_name(target).await {
+            pid
+        } else if let Ok(pid) = target.parse::<Pid>() {
+            pid
+        } else {
+            return Err(anyhow!("no particle found with name or PID '{}'", target));
+        };
+
+        let mailboxes = self.mailboxes.read().await;
+        let handle = mailboxes
+            .get(&pid)
+            .ok_or_else(|| anyhow!("no mailbox for '{}'", target))?;
+        handle
+            .tx
+            .send(message)
+            .map_err(|_| anyhow!("mailbox closed for '{}'", target))
+    }
+
+    /// Block until a message arrives in the particle's mailbox.
+    pub async fn receive_message(&self, pid: &Pid) -> Result<Vec<String>> {
+        let rx = {
+            let mailboxes = self.mailboxes.read().await;
+            let handle = mailboxes
+                .get(pid)
+                .ok_or_else(|| anyhow!("no mailbox for pid '{}'", pid))?;
+            handle.rx.clone()
+        };
+        let mut guard = rx.lock().await;
+        guard
+            .recv()
+            .await
+            .ok_or_else(|| anyhow!("mailbox closed for pid '{}'", pid))
     }
 }
 
@@ -242,5 +299,51 @@ mod tests {
         let result = registry.spawn("echo", Some("echo"), None).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not registered"));
+    }
+
+    #[tokio::test]
+    async fn test_mailbox_send_receive() {
+        let key = SecretKey::generate(&mut rand::rng());
+        let node = key.public();
+        let engine = make_engine();
+        let registry = ParticleRegistry::new(PidGenerator::new(node), engine);
+
+        // send_message should fail for unknown target
+        let result = registry.send_message("nonexistent", vec!["hello".into()]).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_mailbox_roundtrip() {
+        let key = SecretKey::generate(&mut rand::rng());
+        let node = key.public();
+        let engine = make_engine();
+        let registry = Arc::new(ParticleRegistry::new(PidGenerator::new(node), engine));
+
+        // We can't spawn real WASM components in unit tests, so test the
+        // mailbox plumbing directly by creating a channel and inserting it.
+        let (tx, rx) = mpsc::unbounded_channel();
+        let pid = registry.pid_gen().next();
+        registry
+            .mailboxes
+            .write()
+            .await
+            .insert(pid.clone(), MailboxHandle {
+                tx,
+                rx: Arc::new(tokio::sync::Mutex::new(rx)),
+            });
+
+        // Register a name for the PID
+        registry.names.write().await.insert("test".to_string(), pid.clone());
+
+        // Send by name
+        registry
+            .send_message("test", vec!["hello".into(), "world".into()])
+            .await
+            .unwrap();
+
+        // Receive
+        let msg = registry.receive_message(&pid).await.unwrap();
+        assert_eq!(msg, vec!["hello".to_string(), "world".to_string()]);
     }
 }
