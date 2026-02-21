@@ -1,5 +1,14 @@
 use plasmoid::host::{log_message, HostState, LogLevel};
+use plasmoid::pid::Pid;
 use plasmoid::policy::PolicySet;
+
+fn make_test_pid() -> Pid {
+    let key = iroh::SecretKey::generate(&mut rand::rng());
+    Pid {
+        node: key.public(),
+        seq: 1,
+    }
+}
 
 #[test]
 fn test_log_level_from_u32() {
@@ -13,8 +22,10 @@ fn test_log_level_from_u32() {
 
 #[test]
 fn test_log_function_exists() {
+    let pid = make_test_pid();
     let state = HostState::new(
-        "test-particle".to_string(),
+        pid,
+        Some("test-particle".to_string()),
         PolicySet::with_capabilities(&["logging"]),
     );
 

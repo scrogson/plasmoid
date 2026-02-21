@@ -3,6 +3,7 @@ use crate::pid::{Pid, PidGenerator};
 use crate::policy::PolicySet;
 use crate::protocol::PlasmoidProtocol;
 use crate::registry::ParticleRegistry;
+use crate::runtime::start_process;
 use anyhow::Result;
 use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
@@ -203,6 +204,7 @@ impl Runtime {
     ///
     /// `component` is the module name (used to register the code).
     /// `name` is an optional registered name for the spawned particle.
+    /// `init_msg` is the message passed to the component's `init` export.
     /// Returns the PID of the spawned particle.
     pub async fn deploy(
         &self,
@@ -210,10 +212,12 @@ impl Runtime {
         wasm_bytes: &[u8],
         name: Option<&str>,
         capabilities: PolicySet,
+        init_msg: &[u8],
     ) -> Result<Pid> {
         self.load(component, wasm_bytes, capabilities.clone())
             .await?;
-        self.spawn(component, name, Some(capabilities)).await
+        self.spawn(component, name, Some(capabilities), init_msg)
+            .await
     }
 
     /// Spawn a new particle from a registered component.
@@ -222,8 +226,37 @@ impl Runtime {
         component: &str,
         name: Option<&str>,
         capabilities: Option<PolicySet>,
+        init_msg: &[u8],
     ) -> Result<Pid> {
-        let pid = self.registry.spawn(component, name, capabilities).await?;
+        // Look up the component template
+        let (comp, default_caps) = self
+            .registry
+            .get_component(component)
+            .await
+            .ok_or_else(|| anyhow::anyhow!("component '{}' not registered", component))?;
+
+        let caps = capabilities.unwrap_or(default_caps);
+
+        // Spawn in the registry (creates channels)
+        let (pid, receivers) = self
+            .registry
+            .spawn(component, name, Some(caps.clone()))
+            .await?;
+
+        // Start the process (init + message loop)
+        start_process(
+            &self.engine,
+            &comp,
+            &caps,
+            pid.clone(),
+            name.map(|s| s.to_string()),
+            init_msg,
+            receivers,
+            Some(self.endpoint.clone()),
+            self.registry.clone(),
+            Some(self.doc_registry.clone()),
+        )
+        .await?;
 
         // Announce to registry document (best-effort)
         if let Err(e) = self

@@ -10,12 +10,9 @@ use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 /// State available to host functions during WASM execution.
 pub struct HostState {
-    particle_id: String,
-    particle_name: Option<String>,
+    pid: Pid,
+    name: Option<String>,
     capabilities: PolicySet,
-    pid: Option<Pid>,
-    remote_pid: Option<Pid>,
-    remote_node_id: Option<String>,
     endpoint: Option<Endpoint>,
     engine: Option<Engine>,
     registry: Option<Arc<ParticleRegistry>>,
@@ -27,10 +24,9 @@ pub struct HostState {
 impl std::fmt::Debug for HostState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HostState")
-            .field("particle_id", &self.particle_id)
-            .field("capabilities", &self.capabilities)
             .field("pid", &self.pid)
-            .field("remote_node_id", &self.remote_node_id)
+            .field("name", &self.name)
+            .field("capabilities", &self.capabilities)
             .finish_non_exhaustive()
     }
 }
@@ -45,14 +41,11 @@ impl WasiView for HostState {
 }
 
 impl HostState {
-    pub fn new(particle_id: String, capabilities: PolicySet) -> Self {
+    pub fn new(pid: Pid, name: Option<String>, capabilities: PolicySet) -> Self {
         Self {
-            particle_id,
-            particle_name: None,
+            pid,
+            name,
             capabilities,
-            pid: None,
-            remote_pid: None,
-            remote_node_id: None,
             endpoint: None,
             engine: None,
             registry: None,
@@ -62,44 +55,20 @@ impl HostState {
         }
     }
 
-    pub fn particle_id(&self) -> &str {
-        &self.particle_id
+    pub fn pid(&self) -> &Pid {
+        &self.pid
     }
 
-    pub fn particle_name(&self) -> Option<&str> {
-        self.particle_name.as_deref()
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
     }
 
-    pub fn set_particle_name(&mut self, name: Option<String>) {
-        self.particle_name = name;
+    pub fn set_name(&mut self, name: Option<String>) {
+        self.name = name;
     }
 
     pub fn capabilities(&self) -> &PolicySet {
         &self.capabilities
-    }
-
-    pub fn pid(&self) -> Option<&Pid> {
-        self.pid.as_ref()
-    }
-
-    pub fn set_pid(&mut self, pid: Option<Pid>) {
-        self.pid = pid;
-    }
-
-    pub fn remote_pid(&self) -> Option<&Pid> {
-        self.remote_pid.as_ref()
-    }
-
-    pub fn set_remote_pid(&mut self, pid: Option<Pid>) {
-        self.remote_pid = pid;
-    }
-
-    pub fn remote_node_id(&self) -> Option<&String> {
-        self.remote_node_id.as_ref()
-    }
-
-    pub fn set_remote_node_id(&mut self, node_id: Option<String>) {
-        self.remote_node_id = node_id;
     }
 
     pub fn endpoint(&self) -> Option<&Endpoint> {

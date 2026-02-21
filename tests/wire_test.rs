@@ -1,57 +1,51 @@
 use plasmoid::wire::{
-    CallRequest, CallResponse, Command, CommandResponse, SpawnRequest, SpawnResponse, SpawnResult,
+    SendRequest, SendResponse, Command, CommandResponse, SpawnRequest, SpawnResponse, SpawnResult,
     Target, serialize, deserialize,
 };
 use plasmoid::pid::Pid;
 
 #[test]
-fn test_roundtrip_call_request() {
-    let req = CallRequest {
-        id: 1,
+fn test_roundtrip_send_request() {
+    let req = SendRequest {
         target: Target::Name("echo".to_string()),
-        function: "echo".to_string(),
-        args: vec!["\"hello world\"".to_string()],
+        msg: b"hello world".to_vec(),
     };
 
     let bytes = serialize(&req).unwrap();
-    let decoded: CallRequest = deserialize(&bytes).unwrap();
+    let decoded: SendRequest = deserialize(&bytes).unwrap();
 
     assert_eq!(req, decoded);
 }
 
 #[test]
-fn test_roundtrip_call_response_ok() {
-    let resp = CallResponse {
-        id: 1,
-        result: Ok(vec!["\"hello world\"".to_string()]),
+fn test_roundtrip_send_response_ok() {
+    let resp = SendResponse {
+        result: Ok(()),
     };
 
     let bytes = serialize(&resp).unwrap();
-    let decoded: CallResponse = deserialize(&bytes).unwrap();
+    let decoded: SendResponse = deserialize(&bytes).unwrap();
 
     assert_eq!(resp, decoded);
 }
 
 #[test]
-fn test_roundtrip_call_response_err() {
-    let resp = CallResponse {
-        id: 1,
-        result: Err("not found".to_string()),
+fn test_roundtrip_send_response_err() {
+    let resp = SendResponse {
+        result: Err("no process".to_string()),
     };
 
     let bytes = serialize(&resp).unwrap();
-    let decoded: CallResponse = deserialize(&bytes).unwrap();
+    let decoded: SendResponse = deserialize(&bytes).unwrap();
 
     assert_eq!(resp, decoded);
 }
 
 #[test]
-fn test_roundtrip_command_call() {
-    let cmd = Command::Call(CallRequest {
-        id: 42,
+fn test_roundtrip_command_send() {
+    let cmd = Command::Send(SendRequest {
         target: Target::Name("echo".to_string()),
-        function: "echo".to_string(),
-        args: vec!["\"hello\"".to_string()],
+        msg: b"hello".to_vec(),
     });
 
     let bytes = serialize(&cmd).unwrap();
@@ -65,6 +59,7 @@ fn test_roundtrip_command_spawn() {
     let cmd = Command::Spawn(SpawnRequest {
         component: "echo_actor".to_string(),
         name: Some("echo".to_string()),
+        init_msg: b"init data".to_vec(),
     });
 
     let bytes = serialize(&cmd).unwrap();
@@ -78,6 +73,7 @@ fn test_roundtrip_command_spawn_no_name() {
     let cmd = Command::Spawn(SpawnRequest {
         component: "echo_actor".to_string(),
         name: None,
+        init_msg: vec![],
     });
 
     let bytes = serialize(&cmd).unwrap();
@@ -87,10 +83,9 @@ fn test_roundtrip_command_spawn_no_name() {
 }
 
 #[test]
-fn test_roundtrip_command_response_call() {
-    let resp = CommandResponse::Call(CallResponse {
-        id: 1,
-        result: Ok(vec!["\"result\"".to_string()]),
+fn test_roundtrip_command_response_send() {
+    let resp = CommandResponse::Send(SendResponse {
+        result: Ok(()),
     });
 
     let bytes = serialize(&resp).unwrap();
@@ -116,4 +111,20 @@ fn test_roundtrip_command_response_spawn() {
     let decoded: CommandResponse = deserialize(&bytes).unwrap();
 
     assert_eq!(resp, decoded);
+}
+
+#[test]
+fn test_roundtrip_send_request_with_pid_target() {
+    let node_key = iroh::SecretKey::generate(&mut rand::rng());
+    let pid = Pid { node: node_key.public(), seq: 42 };
+
+    let req = SendRequest {
+        target: Target::Pid(pid),
+        msg: vec![1, 2, 3, 4],
+    };
+
+    let bytes = serialize(&req).unwrap();
+    let decoded: SendRequest = deserialize(&bytes).unwrap();
+
+    assert_eq!(req, decoded);
 }

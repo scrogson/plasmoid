@@ -1,6 +1,6 @@
 use anyhow::{bail, Result};
 use iroh::EndpointId;
-use plasmoid::client::{ParticleRef, NodeClient};
+use plasmoid::client::NodeClient;
 use plasmoid::policy::PolicySet;
 use plasmoid::Runtime;
 use std::path::{Path, PathBuf};
@@ -22,18 +22,18 @@ Usage:
                                              (default: ~/.config/plasmoid)
         --load-path <dir>                    Load all .wasm files from directory
         --peer <node-id>                     Bootstrap peer for cluster sync
-        --spawn <component> [--name <name>]  Spawn a particle after loading
+        --spawn <component> [--name <name>] [--init <hex>]
+                                             Spawn a particle after loading
 
       Component name is derived from the file stem (e.g. echo_actor.wasm -> echo_actor).
 
-  plasmoid spawn [--node <id>] <component> [--name <name>]
+  plasmoid spawn [--node <id>] <component> [--name <name>] [--init <hex>]
       Spawn a particle on a running node. Prints the PID.
       Uses PLASMOID_NODE env var if --node not specified.
 
-  plasmoid call [<node-id>] <name> <function> [args...]
-      Call a function on a particle. If the first arg is not a valid node ID,
-      uses PLASMOID_NODE env var as the bootstrap node.
-      Arguments are wasm-wave encoded (strings need quotes: '\"hello\"').
+  plasmoid send [<node-id>] <name-or-pid> <message>
+      Send a message to a particle. Message is a UTF-8 string sent as bytes.
+      If the first arg is not a valid node ID, uses PLASMOID_NODE env var.
 
 Examples:
   plasmoid start --load-path target/debug
@@ -42,8 +42,8 @@ Examples:
   plasmoid start --load-path target/debug --spawn echo_actor --name echo
   plasmoid spawn --node a3f7bc... echo_actor --name echo
   PLASMOID_NODE=a3f7bc... plasmoid spawn echo_actor --name echo
-  plasmoid call a3f7bc... echo echo '\"hello world\"'
-  PLASMOID_NODE=a3f7bc... plasmoid call echo echo '\"hello world\"'
+  plasmoid send a3f7bc... echo \"hello world\"
+  PLASMOID_NODE=a3f7bc... plasmoid send echo \"hello world\"
 ";
 
 #[tokio::main]
@@ -59,7 +59,14 @@ async fn main() -> Result<()> {
         },
         Some("start") => cmd_start(&args[2..]).await,
         Some("spawn") => cmd_spawn(&args[2..]).await,
-        Some("call") => cmd_call(&args[2..]).await,
+        Some("send") => cmd_send(&args[2..]).await,
+        Some("call") => {
+            bail!(
+                "'plasmoid call' has been replaced by 'plasmoid send'.\n\
+                 Use 'plasmoid send' to send messages to particles.\n\n{}",
+                USAGE
+            );
+        }
         Some("run") => {
             bail!(
                 "'plasmoid run' has been replaced by 'plasmoid start'.\n\
@@ -70,7 +77,7 @@ async fn main() -> Result<()> {
         }
         _ => {
             eprint!("{USAGE}");
-            bail!("expected subcommand: new, component, start, spawn, or call");
+            bail!("expected subcommand: new, component, start, spawn, or send");
         }
     }
 }
@@ -79,6 +86,7 @@ async fn main() -> Result<()> {
 struct SpawnSpec {
     component: String,
     name: Option<String>,
+    init_msg: Vec<u8>,
 }
 
 fn default_data_dir() -> PathBuf {
@@ -89,6 +97,15 @@ fn default_data_dir() -> PathBuf {
     } else {
         PathBuf::from(".config/plasmoid")
     }
+}
+
+/// Parse a hex string into bytes. Returns empty vec for empty/missing input.
+fn parse_hex_init(hex_str: &str) -> Result<Vec<u8>> {
+    if hex_str.is_empty() {
+        return Ok(vec![]);
+    }
+    hex::decode(hex_str)
+        .map_err(|e| anyhow::anyhow!("invalid hex for --init: {}", e))
 }
 
 async fn cmd_start(args: &[String]) -> Result<()> {
@@ -139,17 +156,37 @@ async fn cmd_start(args: &[String]) -> Result<()> {
                     .get(i + 1)
                     .ok_or_else(|| anyhow::anyhow!("--spawn requires a component name"))?
                     .clone();
-                let name = if args.get(i + 2).map(|s| s.as_str()) == Some("--name") {
-                    let n = args
-                        .get(i + 3)
-                        .ok_or_else(|| anyhow::anyhow!("--name requires a value"))?;
-                    i += 4;
-                    Some(n.clone())
-                } else {
-                    i += 2;
-                    None
-                };
-                spawn_specs.push(SpawnSpec { component, name });
+                i += 2;
+
+                let mut name = None;
+                let mut init_msg = vec![];
+
+                // Parse optional --name and --init after --spawn <component>
+                while i < args.len() {
+                    match args[i].as_str() {
+                        "--name" => {
+                            let n = args
+                                .get(i + 1)
+                                .ok_or_else(|| anyhow::anyhow!("--name requires a value"))?;
+                            name = Some(n.clone());
+                            i += 2;
+                        }
+                        "--init" => {
+                            let hex = args
+                                .get(i + 1)
+                                .ok_or_else(|| anyhow::anyhow!("--init requires a hex value"))?;
+                            init_msg = parse_hex_init(hex)?;
+                            i += 2;
+                        }
+                        _ => break,
+                    }
+                }
+
+                spawn_specs.push(SpawnSpec {
+                    component,
+                    name,
+                    init_msg,
+                });
             }
             arg if arg.ends_with(".wasm") => {
                 wasm_files.push(arg.to_string());
@@ -217,7 +254,12 @@ async fn cmd_start(args: &[String]) -> Result<()> {
         let mut pids = Vec::new();
         for spec in &spawn_specs {
             let pid = runtime
-                .spawn(&spec.component, spec.name.as_deref(), Some(PolicySet::all()))
+                .spawn(
+                    &spec.component,
+                    spec.name.as_deref(),
+                    Some(PolicySet::all()),
+                    &spec.init_msg,
+                )
                 .await?;
             pids.push((pid, spec.component.clone(), spec.name.clone()));
         }
@@ -239,7 +281,7 @@ async fn cmd_start(args: &[String]) -> Result<()> {
 
 async fn cmd_spawn(args: &[String]) -> Result<()> {
     if args.is_empty() {
-        bail!("usage: plasmoid spawn [--node <id>] <component> [--name <name>]");
+        bail!("usage: plasmoid spawn [--node <id>] <component> [--name <name>] [--init <hex>]");
     }
 
     let mut i = 0;
@@ -264,14 +306,30 @@ async fn cmd_spawn(args: &[String]) -> Result<()> {
         .clone();
     i += 1;
 
-    let name = if args.get(i).map(|s| s.as_str()) == Some("--name") {
-        let n = args
-            .get(i + 1)
-            .ok_or_else(|| anyhow::anyhow!("--name requires a value"))?;
-        Some(n.as_str())
-    } else {
-        None
-    };
+    let mut name = None;
+    let mut init_msg: Vec<u8> = vec![];
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--name" => {
+                let n = args
+                    .get(i + 1)
+                    .ok_or_else(|| anyhow::anyhow!("--name requires a value"))?;
+                name = Some(n.as_str().to_string());
+                i += 2;
+            }
+            "--init" => {
+                let hex = args
+                    .get(i + 1)
+                    .ok_or_else(|| anyhow::anyhow!("--init requires a hex value"))?;
+                init_msg = parse_hex_init(hex)?;
+                i += 2;
+            }
+            other => {
+                bail!("unexpected argument: '{}'\n\n{}", other, USAGE);
+            }
+        }
+    }
 
     // Resolve node ID from --node or PLASMOID_NODE env var
     let node_id = match node_id {
@@ -295,28 +353,29 @@ async fn cmd_spawn(args: &[String]) -> Result<()> {
         .await?;
 
     let client = NodeClient::new(endpoint, node_id);
-    let result = client.spawn(&component, name).await?;
+    let result = client
+        .spawn(&component, name.as_deref(), &init_msg)
+        .await?;
 
     println!("{}", result.pid);
 
     Ok(())
 }
 
-async fn cmd_call(args: &[String]) -> Result<()> {
+async fn cmd_send(args: &[String]) -> Result<()> {
     if args.len() < 2 {
-        bail!("usage: plasmoid call [<node-id>] <name> <function> [args...]");
+        bail!("usage: plasmoid send [<node-id>] <name-or-pid> <message>");
     }
 
     // Try parsing the first arg as an EndpointId.
     // If it parses, use explicit node addressing.
     // If not, use PLASMOID_NODE env var as the bootstrap node.
-    let (node_id, name, function, call_args) = match args[0].parse::<EndpointId>() {
+    let (node_id, target, message) = match args[0].parse::<EndpointId>() {
         Ok(id) => {
             if args.len() < 3 {
-                bail!("usage: plasmoid call <node-id> <name> <function> [args...]");
+                bail!("usage: plasmoid send <node-id> <name-or-pid> <message>");
             }
-            let call_args: Vec<&str> = args[3..].iter().map(|s| s.as_str()).collect();
-            (id, &args[1], &args[2], call_args)
+            (id, &args[1], &args[2])
         }
         Err(_) => {
             let bootstrap = std::env::var("PLASMOID_NODE").map_err(|_| {
@@ -327,8 +386,7 @@ async fn cmd_call(args: &[String]) -> Result<()> {
             let id: EndpointId = bootstrap
                 .parse()
                 .map_err(|e| anyhow::anyhow!("invalid PLASMOID_NODE '{}': {}", bootstrap, e))?;
-            let call_args: Vec<&str> = args[2..].iter().map(|s| s.as_str()).collect();
-            (id, &args[0], &args[1], call_args)
+            (id, &args[0], &args[1])
         }
     };
 
@@ -337,13 +395,11 @@ async fn cmd_call(args: &[String]) -> Result<()> {
         .address_lookup(mdns)
         .bind()
         .await?;
-    let particle = ParticleRef::remote_by_name(endpoint, name, node_id);
 
-    let results = particle.call(function, &call_args).await?;
+    let client = NodeClient::new(endpoint, node_id);
+    client.send(target, message.as_bytes()).await?;
 
-    for result in &results {
-        println!("{result}");
-    }
+    println!("sent");
 
     Ok(())
 }
@@ -352,52 +408,90 @@ async fn cmd_call(args: &[String]) -> Result<()> {
 // Scaffolding commands
 // ---------------------------------------------------------------------------
 
-const RUNTIME_WIT: &str = r#"package plasmoid:runtime@0.2.0;
+const RUNTIME_WIT: &str = r#"package plasmoid:runtime@0.3.0;
 
-interface logging {
-    enum level {
-        trace,
-        debug,
-        info,
-        warn,
-        error,
-    }
-
-    log: func(level: level, message: string);
-}
-
-interface actor-context {
+interface process {
     resource pid {
-        /// Display representation, e.g. "<ec47b34e.1>"
         to-string: func() -> string;
     }
 
-    /// Resolve a PID string back to a typed handle.
-    resolve: func(pid-string: string) -> option<pid>;
-
-    /// Get this particle's PID.
     self-pid: func() -> pid;
-
-    /// Get this particle's registered name, if any.
     self-name: func() -> option<string>;
 
-    /// Get the caller's PID, if known.
-    caller-pid: func() -> option<pid>;
+    spawn: func(component: string, name: option<string>, init-msg: list<u8>) -> result<pid, spawn-error>;
+    exit: func(reason: exit-reason);
 
-    /// Call a function on another particle by name and await the response.
-    call: func(target: string, function: string, args: list<string>) -> result<list<string>, string>;
+    send: func(target: borrow<pid>, msg: list<u8>) -> result<_, send-error>;
+    resolve: func(pid-string: string) -> option<pid>;
 
-    /// Fire-and-forget function invocation on another particle by name.
-    notify: func(target: string, function: string, args: list<string>) -> result<_, string>;
+    register: func(name: string) -> result<_, registry-error>;
+    unregister: func(name: string) -> result<_, registry-error>;
+    lookup: func(name: string) -> option<pid>;
 
-    /// Spawn a new particle from a registered component.
-    spawn: func(component: string, name: option<string>) -> result<pid, string>;
+    link: func(target: borrow<pid>) -> result<_, link-error>;
+    unlink: func(target: borrow<pid>);
+    monitor: func(target: borrow<pid>) -> monitor-ref;
+    demonitor: func(ref: monitor-ref);
+    trap-exit: func(enabled: bool);
 
-    /// Deposit a message into a particle's mailbox. O(1) via resource handle.
-    send: func(target: pid, message: list<string>) -> result<_, string>;
+    log: func(level: log-level, message: string);
 
-    /// Block until a message arrives in this particle's mailbox.
-    receive: func() -> list<string>;
+    type monitor-ref = u64;
+
+    enum log-level { trace, debug, info, warn, error }
+
+    variant exit-reason {
+        normal,
+        kill,
+        shutdown(string),
+        exception(string),
+    }
+
+    record exit-signal {
+        sender: pid,
+        reason: exit-reason,
+    }
+
+    record down-signal {
+        sender: pid,
+        monitor-ref: monitor-ref,
+        reason: exit-reason,
+    }
+
+    variant message {
+        user(list<u8>),
+        exit(exit-signal),
+        down(down-signal),
+    }
+
+    enum spawn-error {
+        component-not-found,
+        init-failed,
+        resource-limit,
+    }
+
+    enum send-error {
+        no-process,
+        mailbox-full,
+    }
+
+    enum registry-error {
+        already-registered,
+        not-registered,
+    }
+
+    enum link-error {
+        no-process,
+    }
+}
+
+world actor-process {
+    import process;
+
+    use process.{message};
+
+    export init: func(msg: list<u8>) -> result<_, list<u8>>;
+    export handle: func(msg: message);
 }
 "#;
 
@@ -539,7 +633,6 @@ fn cmd_component_new(args: &[String]) -> Result<()> {
     }
 
     let name_underscored = name.replace('-', "_");
-    let namespace_underscored = namespace.replace('-', "_");
     let pascal_name = to_pascal_case(name);
 
     // Create directories
@@ -569,7 +662,7 @@ package = "{namespace}:{name}"
 
 [package.metadata.component.target]
 path = "../../wit/components/{name}"
-world = "{name}"
+world = "actor-process"
 
 [package.metadata.component.target.dependencies]
 "plasmoid:runtime" = {{ path = "../../wit/components/{name}/deps/runtime" }}
@@ -582,15 +675,28 @@ world = "{name}"
         r#"#[allow(warnings)]
 mod bindings;
 
-use bindings::exports::{namespace_underscored}::{name_underscored}::{name_underscored}::Guest;
-use bindings::plasmoid::runtime::logging;
+use bindings::plasmoid::runtime::process;
 
 struct {pascal_name};
 
-impl Guest for {pascal_name} {{
-    fn handle(message: String) -> String {{
-        logging::log(logging::Level::Info, &format!("received: {{message}}"));
-        message
+impl bindings::Guest for {pascal_name} {{
+    fn init(msg: Vec<u8>) -> Result<(), Vec<u8>> {{
+        process::log(process::LogLevel::Info, &format!("{name_underscored} initialized with {{}} bytes", msg.len()));
+        Ok(())
+    }}
+
+    fn handle(msg: bindings::plasmoid::runtime::process::Message) {{
+        match msg {{
+            bindings::plasmoid::runtime::process::Message::User(data) => {{
+                process::log(process::LogLevel::Info, &format!("{name_underscored} received {{}} bytes", data.len()));
+            }}
+            bindings::plasmoid::runtime::process::Message::Exit(signal) => {{
+                process::log(process::LogLevel::Warn, &format!("{name_underscored} received exit signal"));
+            }}
+            bindings::plasmoid::runtime::process::Message::Down(signal) => {{
+                process::log(process::LogLevel::Warn, &format!("{name_underscored} received down signal"));
+            }}
+        }}
     }}
 }}
 
@@ -599,20 +705,13 @@ bindings::export!({pascal_name} with_types_in bindings);
     );
     std::fs::write(component_dir.join("src/lib.rs"), lib_rs)?;
 
-    // wit/components/<name>/<name>.wit
+    // wit/components/<name>/<name>.wit -- just re-export the actor-process world
+    // The component uses the runtime's actor-process world directly
     let component_wit = format!(
         r#"package {namespace}:{name}@0.1.0;
 
-interface {name} {{
-    /// Handle a request
-    handle: func(message: string) -> string;
-}}
-
-world {name} {{
-    export {name};
-
-    import plasmoid:runtime/logging@0.2.0;
-    import plasmoid:runtime/actor-context@0.2.0;
+world {name_underscored} {{
+    include plasmoid:runtime/actor-process@0.3.0;
 }}
 "#
     );

@@ -1,9 +1,8 @@
-use crate::doc_registry::{DocRegistry, ResolvedParticle};
+use crate::doc_registry::DocRegistry;
 use crate::registry::ParticleRegistry;
-use crate::runtime::invoke::invoke_component;
-use crate::runtime::PLASMOID_ALPN;
+use crate::runtime::start_process;
 use crate::wire::{
-    self, deserialize, serialize, CallRequest, CallResponse, Command, CommandResponse,
+    deserialize, serialize, Command, CommandResponse, SendRequest, SendResponse,
     SpawnRequest, SpawnResponse, SpawnResult, Target,
 };
 use iroh::endpoint::Connection;
@@ -43,7 +42,6 @@ impl PlasmoidProtocol {
 impl iroh::protocol::ProtocolHandler for PlasmoidProtocol {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         let remote = connection.remote_id();
-        let remote_node_id = remote.to_string();
 
         tracing::debug!(remote = %remote, "Plasmoid connection accepted");
 
@@ -58,7 +56,6 @@ impl iroh::protocol::ProtocolHandler for PlasmoidProtocol {
 
             let registry = self.registry.clone();
             let engine = self.engine.clone();
-            let remote_node_id = remote_node_id.clone();
             let endpoint = self.endpoint.clone();
             let doc_registry = self.doc_registry.clone();
 
@@ -68,7 +65,6 @@ impl iroh::protocol::ProtocolHandler for PlasmoidProtocol {
                     recv,
                     registry,
                     engine,
-                    remote_node_id,
                     endpoint,
                     doc_registry,
                 )
@@ -88,7 +84,6 @@ async fn handle_stream(
     mut recv: iroh::endpoint::RecvStream,
     registry: Arc<ParticleRegistry>,
     engine: Engine,
-    remote_node_id: String,
     endpoint: Endpoint,
     doc_registry: Option<Arc<DocRegistry>>,
 ) -> anyhow::Result<()> {
@@ -98,18 +93,18 @@ async fn handle_stream(
         Ok(cmd) => cmd,
         Err(e) => {
             tracing::error!(error = %e, "Failed to deserialize command");
-            // Can't send a typed error response since we don't know the command type.
-            // Just close the stream cleanly.
             send.finish()?;
             return Ok(());
         }
     };
 
     let result = match command {
-        Command::Call(request) => {
-            handle_call(request, registry, engine, remote_node_id, endpoint, doc_registry).await
+        Command::Send(request) => {
+            handle_send(request, registry).await
         }
-        Command::Spawn(request) => handle_spawn(request, registry, doc_registry).await,
+        Command::Spawn(request) => {
+            handle_spawn(request, registry, engine, endpoint, doc_registry).await
+        }
     };
 
     let response_bytes = serialize(&result)?;
@@ -119,152 +114,109 @@ async fn handle_stream(
     Ok(())
 }
 
-async fn handle_call(
-    request: CallRequest,
+async fn handle_send(
+    request: SendRequest,
     registry: Arc<ParticleRegistry>,
-    engine: Engine,
-    remote_node_id: String,
-    endpoint: Endpoint,
-    doc_registry: Option<Arc<DocRegistry>>,
 ) -> CommandResponse {
-    tracing::debug!(target = ?request.target, function = %request.function, "Received call request");
+    tracing::debug!(target = ?request.target, "Received send request");
 
-    // Resolve the target -- check local registry first
-    let particle = match &request.target {
-        Target::Pid(pid) => registry.get_by_pid(pid).await,
-        Target::Name(name) => {
-            if let Some(pid) = registry.get_by_name(name).await {
-                registry.get_by_pid(&pid).await
-            } else {
-                None
-            }
-        }
+    // Resolve the target
+    let pid = match &request.target {
+        Target::Pid(pid) => Some(pid.clone()),
+        Target::Name(name) => registry.get_by_name(name).await,
     };
 
-    let particle = match particle {
+    let pid = match pid {
         Some(p) => p,
         None => {
-            // Check doc registry for remote particles and forward
-            if let Some(ref doc_reg) = doc_registry {
-                let resolved = match &request.target {
-                    Target::Name(name) => doc_reg.resolve_name(name).await,
-                    Target::Pid(pid) => doc_reg.resolve_pid(pid).await,
-                };
-
-                if let Some(ResolvedParticle::Remote(remote)) = resolved {
-                    return forward_to_remote(&endpoint, &remote, &request).await;
-                }
-            }
-
-            return CommandResponse::Call(CallResponse {
-                id: request.id,
+            return CommandResponse::Send(SendResponse {
                 result: Err(format!("no particle found for target {:?}", request.target)),
             });
         }
     };
 
-    let component = particle.component.clone();
-    let capabilities = particle.capabilities.clone();
-    let particle_id = particle.name.unwrap_or_else(|| particle.pid.to_string());
-    let pid = particle.pid.clone();
-    let remote = remote_node_id.clone();
-    let function = request.function.clone();
-    let args = request.args.clone();
-
-    let result = invoke_component(
-        &engine,
-        &component,
-        &capabilities,
-        &particle_id,
-        Some(pid),
-        Some(remote),
-        &function,
-        &args,
-        Some(endpoint),
-        Some(registry),
-        doc_registry,
-    )
-    .await;
-
-    let result = match result {
-        Ok(wave_results) => Ok(wave_results),
-        Err(e) => Err(e.to_string()),
-    };
-
-    CommandResponse::Call(CallResponse {
-        id: request.id,
-        result,
-    })
+    // Send the message to the process mailbox
+    match registry.send_to_pid(&pid, request.msg).await {
+        Ok(()) => CommandResponse::Send(SendResponse {
+            result: Ok(()),
+        }),
+        Err(e) => CommandResponse::Send(SendResponse {
+            result: Err(format!("{}", e)),
+        }),
+    }
 }
 
 async fn handle_spawn(
     request: SpawnRequest,
     registry: Arc<ParticleRegistry>,
+    engine: Engine,
+    endpoint: Endpoint,
     doc_registry: Option<Arc<DocRegistry>>,
 ) -> CommandResponse {
-    tracing::debug!(component = %request.component, name = ?request.name, "Received spawn request");
-
-    let result = registry
-        .spawn(&request.component, request.name.as_deref(), None)
-        .await;
-
-    CommandResponse::Spawn(SpawnResponse {
-        result: match result {
-            Ok(pid) => {
-                // Announce to doc registry for cross-node discovery
-                if let Some(ref doc_reg) = doc_registry {
-                    if let Err(e) = doc_reg
-                        .announce_spawn(&pid, &request.component, request.name.as_deref())
-                        .await
-                    {
-                        tracing::debug!(error = %e, "Failed to announce spawn (no peers yet?)");
-                    }
-                }
-                Ok(SpawnResult {
-                    pid,
-                    component: request.component,
-                    name: request.name,
-                })
-            }
-            Err(e) => Err(e.to_string()),
-        },
-    })
-}
-
-/// Forward a request to a remote node and return the response.
-async fn forward_to_remote(
-    endpoint: &Endpoint,
-    remote: &crate::doc_registry::RemoteParticle,
-    request: &CallRequest,
-) -> CommandResponse {
     tracing::debug!(
-        target = ?request.target,
-        node = %remote.node.fmt_short(),
-        "Forwarding request to remote node"
+        component = %request.component,
+        name = ?request.name,
+        "Received spawn request"
     );
 
-    let result = async {
-        let conn = endpoint
-            .connect(remote.addr.clone(), PLASMOID_ALPN)
-            .await?;
-        let (mut remote_send, mut remote_recv) = conn.open_bi().await?;
+    // Look up the component template
+    let (component, caps) = match registry.get_component(&request.component).await {
+        Some(result) => result,
+        None => {
+            return CommandResponse::Spawn(SpawnResponse {
+                result: Err(format!("component '{}' not registered", request.component)),
+            });
+        }
+    };
 
-        let command = Command::Call(request.clone());
-        let request_bytes = wire::serialize(&command)?;
-        remote_send.write_all(&request_bytes).await?;
-        remote_send.finish()?;
+    // Spawn in registry
+    let (pid, receivers) = match registry
+        .spawn(&request.component, request.name.as_deref(), Some(caps.clone()))
+        .await
+    {
+        Ok(result) => result,
+        Err(e) => {
+            return CommandResponse::Spawn(SpawnResponse {
+                result: Err(e.to_string()),
+            });
+        }
+    };
 
-        let response_bytes = remote_recv.read_to_end(1024 * 1024).await?;
-        let response: CommandResponse = wire::deserialize(&response_bytes)?;
-        Ok::<_, anyhow::Error>(response)
+    // Start the process (init + message loop)
+    if let Err(e) = start_process(
+        &engine,
+        &component,
+        &caps,
+        pid.clone(),
+        request.name.clone(),
+        &request.init_msg,
+        receivers,
+        Some(endpoint),
+        registry.clone(),
+        doc_registry.clone(),
+    )
+    .await
+    {
+        return CommandResponse::Spawn(SpawnResponse {
+            result: Err(format!("failed to start process: {}", e)),
+        });
     }
-    .await;
 
-    match result {
-        Ok(response) => response,
-        Err(e) => CommandResponse::Call(CallResponse {
-            id: request.id,
-            result: Err(format!("forwarding failed: {}", e)),
+    // Announce to doc registry for cross-node discovery
+    if let Some(ref doc_reg) = doc_registry {
+        if let Err(e) = doc_reg
+            .announce_spawn(&pid, &request.component, request.name.as_deref())
+            .await
+        {
+            tracing::debug!(error = %e, "Failed to announce spawn (no peers yet?)");
+        }
+    }
+
+    CommandResponse::Spawn(SpawnResponse {
+        result: Ok(SpawnResult {
+            pid,
+            component: request.component,
+            name: request.name,
         }),
-    }
+    })
 }

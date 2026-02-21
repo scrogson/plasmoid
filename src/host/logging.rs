@@ -1,7 +1,7 @@
 use crate::host::HostState;
 use wasmtime::component::{ComponentType, Lift, Lower};
 
-/// Log level enum matching the WIT `plasmoid:runtime/logging@0.1.0` level type.
+/// Log level enum matching the WIT `plasmoid:runtime/process@0.3.0` log-level type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ComponentType, Lift, Lower)]
 #[component(enum)]
 #[repr(u8)]
@@ -31,12 +31,13 @@ impl From<u32> for LogLevel {
 }
 
 pub fn log_message(state: &HostState, level: LogLevel, message: &str) {
-    let particle_id = state.particle_id();
+    let pid = state.pid();
+    let name_str = state.name().unwrap_or("?");
     match level {
-        LogLevel::Trace => tracing::trace!(particle = %particle_id, "{}", message),
-        LogLevel::Debug => tracing::debug!(particle = %particle_id, "{}", message),
-        LogLevel::Info => tracing::info!(particle = %particle_id, "{}", message),
-        LogLevel::Warn => tracing::warn!(particle = %particle_id, "{}", message),
-        LogLevel::Error => tracing::error!(particle = %particle_id, "{}", message),
+        LogLevel::Trace => tracing::trace!(pid = %pid, name = %name_str, "{}", message),
+        LogLevel::Debug => tracing::debug!(pid = %pid, name = %name_str, "{}", message),
+        LogLevel::Info => tracing::info!(pid = %pid, name = %name_str, "{}", message),
+        LogLevel::Warn => tracing::warn!(pid = %pid, name = %name_str, "{}", message),
+        LogLevel::Error => tracing::error!(pid = %pid, name = %name_str, "{}", message),
     }
 }

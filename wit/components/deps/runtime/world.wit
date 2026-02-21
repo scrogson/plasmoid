@@ -1,47 +1,85 @@
-package plasmoid:runtime@0.2.0;
+package plasmoid:runtime@0.3.0;
 
-interface logging {
-    enum level {
-        trace,
-        debug,
-        info,
-        warn,
-        error,
-    }
-
-    log: func(level: level, message: string);
-}
-
-interface actor-context {
+interface process {
     resource pid {
-        /// Display representation, e.g. "<ec47b34e.1>"
         to-string: func() -> string;
     }
 
-    /// Resolve a PID string back to a typed handle.
-    resolve: func(pid-string: string) -> option<pid>;
-
-    /// Get this particle's PID.
     self-pid: func() -> pid;
-
-    /// Get this particle's registered name, if any.
     self-name: func() -> option<string>;
 
-    /// Get the caller's PID, if known.
-    caller-pid: func() -> option<pid>;
+    spawn: func(component: string, name: option<string>, init-msg: list<u8>) -> result<pid, spawn-error>;
+    exit: func(reason: exit-reason);
 
-    /// Call a function on another particle by name and await the response.
-    call: func(target: string, function: string, args: list<string>) -> result<list<string>, string>;
+    send: func(target: borrow<pid>, msg: list<u8>) -> result<_, send-error>;
+    resolve: func(pid-string: string) -> option<pid>;
 
-    /// Fire-and-forget function invocation on another particle by name.
-    notify: func(target: string, function: string, args: list<string>) -> result<_, string>;
+    register: func(name: string) -> result<_, registry-error>;
+    unregister: func(name: string) -> result<_, registry-error>;
+    lookup: func(name: string) -> option<pid>;
 
-    /// Spawn a new particle from a registered component.
-    spawn: func(component: string, name: option<string>) -> result<pid, string>;
+    link: func(target: borrow<pid>) -> result<_, link-error>;
+    unlink: func(target: borrow<pid>);
+    monitor: func(target: borrow<pid>) -> monitor-ref;
+    demonitor: func(ref: monitor-ref);
+    trap-exit: func(enabled: bool);
 
-    /// Deposit a message into a particle's mailbox. O(1) via resource handle.
-    send: func(target: borrow<pid>, message: list<string>) -> result<_, string>;
+    log: func(level: log-level, message: string);
 
-    /// Block until a message arrives in this particle's mailbox.
-    receive: func() -> list<string>;
+    type monitor-ref = u64;
+
+    enum log-level { trace, debug, info, warn, error }
+
+    variant exit-reason {
+        normal,
+        kill,
+        shutdown(string),
+        exception(string),
+    }
+
+    record exit-signal {
+        sender: pid,
+        reason: exit-reason,
+    }
+
+    record down-signal {
+        sender: pid,
+        monitor-ref: monitor-ref,
+        reason: exit-reason,
+    }
+
+    variant message {
+        user(list<u8>),
+        exit(exit-signal),
+        down(down-signal),
+    }
+
+    enum spawn-error {
+        component-not-found,
+        init-failed,
+        resource-limit,
+    }
+
+    enum send-error {
+        no-process,
+        mailbox-full,
+    }
+
+    enum registry-error {
+        already-registered,
+        not-registered,
+    }
+
+    enum link-error {
+        no-process,
+    }
+}
+
+world actor-process {
+    import process;
+
+    use process.{message};
+
+    export init: func(msg: list<u8>) -> result<_, list<u8>>;
+    export handle: func(msg: message);
 }

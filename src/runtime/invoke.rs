@@ -1,616 +1,487 @@
 //! WASM component invocation module.
 //!
-//! This module handles instantiating WASM components and invoking their
-//! exported functions with dynamic dispatch using wasm-wave typed values.
+//! This module handles instantiating WASM components, calling their `init`
+//! export, and running the message loop that delivers user and system messages
+//! to the `handle` export.
 
-use crate::doc_registry::{DocRegistry, ResolvedParticle};
-use crate::host::{log_message, HostState, LogLevel};
-use crate::pid::Pid;
+use crate::doc_registry::DocRegistry;
+use crate::host::HostState;
+use crate::message::{ExitReason, SystemMessage};
+pub use crate::pid::Pid;
 use crate::policy::PolicySet;
-use crate::registry::ParticleRegistry;
-use crate::runtime::PLASMOID_ALPN;
-use crate::wire;
+use crate::registry::{MailboxReceivers, ParticleRegistry, SendError};
 use anyhow::{anyhow, Result};
 use iroh::Endpoint;
 use std::sync::Arc;
-use wasmtime::component::types::ComponentItem;
-use wasmtime::component::{Component, Linker, Resource, Type, Val};
+use wasmtime::component::Resource;
 use wasmtime::Engine;
 
-/// Invoke a function on a WASM component instance.
-pub async fn invoke_component(
+// Generate typed bindings from the WIT world "actor-process".
+//
+// This generates:
+// - `ActorProcess` struct for instantiation and calling exports
+// - `plasmoid::runtime::process::Host` trait for import functions
+// - `plasmoid::runtime::process::HostPid` trait for pid resource methods
+// - Type aliases matching WIT types (Message, ExitReason, etc.)
+//
+// With `trappable` imports, all Host trait methods return `wasmtime::Result<T>`
+// instead of bare `T`, allowing host functions to trap on error.
+wasmtime::component::bindgen!({
+    path: "wit",
+    world: "actor-process",
+    imports: {
+        default: async | trappable,
+    },
+    exports: {
+        default: async,
+    },
+    with: {
+        "plasmoid:runtime/process.pid": Pid,
+    },
+});
+
+impl plasmoid::runtime::process::HostPid for HostState {
+    async fn to_string(&mut self, self_: Resource<Pid>) -> wasmtime::Result<String> {
+        let pid = self.resource_table().get(&self_)?;
+        Ok(pid.to_string())
+    }
+
+    async fn drop(&mut self, rep: Resource<Pid>) -> wasmtime::Result<()> {
+        self.resource_table_mut().delete(rep)?;
+        Ok(())
+    }
+}
+
+impl plasmoid::runtime::process::Host for HostState {
+    async fn self_pid(&mut self) -> wasmtime::Result<Resource<Pid>> {
+        let pid = self.pid().clone();
+        let resource = self.resource_table_mut().push(pid)?;
+        Ok(resource)
+    }
+
+    async fn self_name(&mut self) -> wasmtime::Result<Option<String>> {
+        Ok(self.name().map(|s| s.to_string()))
+    }
+
+    async fn spawn(
+        &mut self,
+        component: String,
+        name: Option<String>,
+        init_msg: Vec<u8>,
+    ) -> wasmtime::Result<Result<Resource<Pid>, plasmoid::runtime::process::SpawnError>> {
+        let registry = match self.registry() {
+            Some(r) => r.clone(),
+            None => return Ok(Err(plasmoid::runtime::process::SpawnError::InitFailed)),
+        };
+        let engine = match self.engine() {
+            Some(e) => e.clone(),
+            None => return Ok(Err(plasmoid::runtime::process::SpawnError::InitFailed)),
+        };
+        let endpoint = self.endpoint().cloned();
+        let doc_registry = self.doc_registry().cloned();
+
+        // Look up the component template
+        let (comp, caps) = match registry.get_component(&component).await {
+            Some((c, default_caps)) => (c, default_caps),
+            None => return Ok(Err(plasmoid::runtime::process::SpawnError::ComponentNotFound)),
+        };
+
+        // Spawn the process in the registry
+        let (pid, receivers) = match registry
+            .spawn(&component, name.as_deref(), Some(caps.clone()))
+            .await
+        {
+            Ok(result) => result,
+            Err(_) => return Ok(Err(plasmoid::runtime::process::SpawnError::InitFailed)),
+        };
+
+        // Start the process (init + message loop)
+        let pid_clone = pid.clone();
+        let registry_clone = registry.clone();
+        if let Err(e) = start_process(
+            &engine,
+            &comp,
+            &caps,
+            pid_clone,
+            name,
+            &init_msg,
+            receivers,
+            endpoint,
+            registry_clone,
+            doc_registry,
+        )
+        .await
+        {
+            tracing::error!(error = %e, "Failed to start spawned process");
+            return Ok(Err(plasmoid::runtime::process::SpawnError::InitFailed));
+        }
+
+        let resource = self
+            .resource_table_mut()
+            .push(pid)
+            .map_err(|_| anyhow!("resource table full"))?;
+        Ok(Ok(resource))
+    }
+
+    async fn exit(&mut self, reason: plasmoid::runtime::process::ExitReason) -> wasmtime::Result<()> {
+        let exit_reason = wit_exit_reason_to_internal(reason);
+        let pid = self.pid().clone();
+        if let Some(registry) = self.registry() {
+            let registry = registry.clone();
+            registry.exit_process(&pid, exit_reason).await;
+        }
+        Ok(())
+    }
+
+    async fn send(
+        &mut self,
+        target: Resource<Pid>,
+        msg: Vec<u8>,
+    ) -> wasmtime::Result<Result<(), plasmoid::runtime::process::SendError>> {
+        let pid = match self.resource_table().get(&target) {
+            Ok(p) => p.clone(),
+            Err(_) => return Ok(Err(plasmoid::runtime::process::SendError::NoProcess)),
+        };
+
+        let registry = match self.registry() {
+            Some(r) => r.clone(),
+            None => return Ok(Err(plasmoid::runtime::process::SendError::NoProcess)),
+        };
+
+        let result = registry.send_to_pid(&pid, msg).await.map_err(|e| match e {
+            SendError::NoProcess => plasmoid::runtime::process::SendError::NoProcess,
+            SendError::MailboxFull => plasmoid::runtime::process::SendError::MailboxFull,
+        });
+        Ok(result)
+    }
+
+    async fn resolve(&mut self, pid_string: String) -> wasmtime::Result<Option<Resource<Pid>>> {
+        let registry = match self.registry() {
+            Some(r) => r.clone(),
+            None => return Ok(None),
+        };
+        let pid = match registry.resolve_target(&pid_string).await {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+        let resource = self.resource_table_mut().push(pid)?;
+        Ok(Some(resource))
+    }
+
+    async fn register(
+        &mut self,
+        name: String,
+    ) -> wasmtime::Result<Result<(), plasmoid::runtime::process::RegistryError>> {
+        let pid = self.pid().clone();
+        let registry = match self.registry() {
+            Some(r) => r.clone(),
+            None => return Ok(Err(plasmoid::runtime::process::RegistryError::NotRegistered)),
+        };
+        let result = registry
+            .register_name(&pid, &name)
+            .await
+            .map_err(|_| plasmoid::runtime::process::RegistryError::AlreadyRegistered);
+        Ok(result)
+    }
+
+    async fn unregister(
+        &mut self,
+        name: String,
+    ) -> wasmtime::Result<Result<(), plasmoid::runtime::process::RegistryError>> {
+        let registry = match self.registry() {
+            Some(r) => r.clone(),
+            None => return Ok(Err(plasmoid::runtime::process::RegistryError::NotRegistered)),
+        };
+        let result = registry
+            .unregister_name(&name)
+            .await
+            .map_err(|_| plasmoid::runtime::process::RegistryError::NotRegistered);
+        Ok(result)
+    }
+
+    async fn lookup(&mut self, name: String) -> wasmtime::Result<Option<Resource<Pid>>> {
+        let registry = match self.registry() {
+            Some(r) => r.clone(),
+            None => return Ok(None),
+        };
+        let pid = match registry.lookup_name(&name).await {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+        let resource = self.resource_table_mut().push(pid)?;
+        Ok(Some(resource))
+    }
+
+    async fn link(
+        &mut self,
+        target: Resource<Pid>,
+    ) -> wasmtime::Result<Result<(), plasmoid::runtime::process::LinkError>> {
+        let target_pid = match self.resource_table().get(&target) {
+            Ok(p) => p.clone(),
+            Err(_) => return Ok(Err(plasmoid::runtime::process::LinkError::NoProcess)),
+        };
+        let my_pid = self.pid().clone();
+
+        let registry = match self.registry() {
+            Some(r) => r.clone(),
+            None => return Ok(Err(plasmoid::runtime::process::LinkError::NoProcess)),
+        };
+
+        let result = registry
+            .link(&my_pid, &target_pid)
+            .await
+            .map_err(|_| plasmoid::runtime::process::LinkError::NoProcess);
+        Ok(result)
+    }
+
+    async fn unlink(&mut self, target: Resource<Pid>) -> wasmtime::Result<()> {
+        let target_pid = match self.resource_table().get(&target) {
+            Ok(pid) => pid.clone(),
+            Err(_) => return Ok(()),
+        };
+        let my_pid = self.pid().clone();
+
+        if let Some(registry) = self.registry() {
+            let registry = registry.clone();
+            registry.unlink(&my_pid, &target_pid).await;
+        }
+        Ok(())
+    }
+
+    async fn monitor(&mut self, target: Resource<Pid>) -> wasmtime::Result<u64> {
+        let target_pid = match self.resource_table().get(&target) {
+            Ok(pid) => pid.clone(),
+            Err(_) => return Ok(0),
+        };
+        let my_pid = self.pid().clone();
+
+        let registry = match self.registry() {
+            Some(r) => r.clone(),
+            None => return Ok(0),
+        };
+
+        Ok(registry
+            .monitor(&my_pid, &target_pid)
+            .await
+            .unwrap_or(0))
+    }
+
+    async fn demonitor(&mut self, monitor_ref: u64) -> wasmtime::Result<()> {
+        let my_pid = self.pid().clone();
+        if let Some(registry) = self.registry() {
+            let registry = registry.clone();
+            registry.demonitor(&my_pid, monitor_ref).await;
+        }
+        Ok(())
+    }
+
+    async fn trap_exit(&mut self, enabled: bool) -> wasmtime::Result<()> {
+        let my_pid = self.pid().clone();
+        if let Some(registry) = self.registry() {
+            let registry = registry.clone();
+            registry.set_trap_exit(&my_pid, enabled).await;
+        }
+        Ok(())
+    }
+
+    async fn log(&mut self, level: plasmoid::runtime::process::LogLevel, message: String) -> wasmtime::Result<()> {
+        let pid = self.pid();
+        let name_str = self.name().unwrap_or("?");
+        match level {
+            plasmoid::runtime::process::LogLevel::Trace => {
+                tracing::trace!(pid = %pid, name = %name_str, "{}", message)
+            }
+            plasmoid::runtime::process::LogLevel::Debug => {
+                tracing::debug!(pid = %pid, name = %name_str, "{}", message)
+            }
+            plasmoid::runtime::process::LogLevel::Info => {
+                tracing::info!(pid = %pid, name = %name_str, "{}", message)
+            }
+            plasmoid::runtime::process::LogLevel::Warn => {
+                tracing::warn!(pid = %pid, name = %name_str, "{}", message)
+            }
+            plasmoid::runtime::process::LogLevel::Error => {
+                tracing::error!(pid = %pid, name = %name_str, "{}", message)
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Convert WIT exit-reason to internal ExitReason.
+fn wit_exit_reason_to_internal(reason: plasmoid::runtime::process::ExitReason) -> ExitReason {
+    match reason {
+        plasmoid::runtime::process::ExitReason::Normal => ExitReason::Normal,
+        plasmoid::runtime::process::ExitReason::Kill => ExitReason::Kill,
+        plasmoid::runtime::process::ExitReason::Shutdown(s) => ExitReason::Shutdown(s),
+        plasmoid::runtime::process::ExitReason::Exception(s) => ExitReason::Exception(s),
+    }
+}
+
+/// Convert internal ExitReason to WIT exit-reason.
+fn internal_exit_reason_to_wit(reason: &ExitReason) -> plasmoid::runtime::process::ExitReason {
+    match reason {
+        ExitReason::Normal => plasmoid::runtime::process::ExitReason::Normal,
+        ExitReason::Kill => plasmoid::runtime::process::ExitReason::Kill,
+        ExitReason::Shutdown(s) => plasmoid::runtime::process::ExitReason::Shutdown(s.clone()),
+        ExitReason::Exception(s) => plasmoid::runtime::process::ExitReason::Exception(s.clone()),
+    }
+}
+
+/// Convert a SystemMessage to the WIT Message variant for calling handle.
+fn system_message_to_wit(
+    msg: SystemMessage,
+    resource_table: &mut wasmtime::component::ResourceTable,
+) -> Result<plasmoid::runtime::process::Message> {
+    match msg {
+        SystemMessage::Exit { from, reason } => {
+            let sender_resource = resource_table.push(from)?;
+            Ok(plasmoid::runtime::process::Message::Exit(
+                plasmoid::runtime::process::ExitSignal {
+                    sender: sender_resource,
+                    reason: internal_exit_reason_to_wit(&reason),
+                },
+            ))
+        }
+        SystemMessage::Down {
+            from,
+            monitor_ref,
+            reason,
+        } => {
+            let sender_resource = resource_table.push(from)?;
+            Ok(plasmoid::runtime::process::Message::Down(
+                plasmoid::runtime::process::DownSignal {
+                    sender: sender_resource,
+                    monitor_ref,
+                    reason: internal_exit_reason_to_wit(&reason),
+                },
+            ))
+        }
+    }
+}
+
+/// Start a process: instantiate component, call init, run message loop.
+pub async fn start_process(
     engine: &Engine,
-    component: &Component,
+    component: &wasmtime::component::Component,
     capabilities: &PolicySet,
-    particle_id: &str,
-    pid: Option<Pid>,
-    remote_node_id: Option<String>,
-    function: &str,
-    args: &[String],
+    pid: Pid,
+    name: Option<String>,
+    init_msg: &[u8],
+    receivers: MailboxReceivers,
     endpoint: Option<Endpoint>,
-    registry: Option<Arc<ParticleRegistry>>,
+    registry: Arc<ParticleRegistry>,
     doc_registry: Option<Arc<DocRegistry>>,
-) -> Result<Vec<String>> {
-    // Create host state for this invocation
-    let mut state = HostState::new(particle_id.to_string(), capabilities.clone());
-    state.set_particle_name(Some(particle_id.to_string()));
-    state.set_pid(pid);
-    state.set_remote_node_id(remote_node_id);
-    state.set_endpoint(endpoint.clone());
+) -> Result<()> {
+    // Create host state
+    let mut state = HostState::new(pid.clone(), name, capabilities.clone());
+    state.set_endpoint(endpoint);
     state.set_engine(Some(engine.clone()));
-    state.set_registry(registry);
+    state.set_registry(Some(registry.clone()));
     state.set_doc_registry(doc_registry);
 
-    // Create a store for this invocation
+    // Create store and linker
     let mut store = wasmtime::Store::new(engine, state);
+    let mut linker = wasmtime::component::Linker::<HostState>::new(engine);
 
-    // Create linker with host functions
-    let mut linker = Linker::<HostState>::new(engine);
-    add_host_functions(&mut linker, capabilities)?;
+    // Add WASI support
+    wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
+
+    // Add the process interface imports (generated by bindgen!)
+    ActorProcess::add_to_linker::<HostState, wasmtime::component::HasSelf<HostState>>(&mut linker, |state: &mut HostState| state)?;
 
     // Instantiate the component
-    let instance = linker.instantiate_async(&mut store, component).await?;
+    let actor_process =
+        ActorProcess::instantiate_async(&mut store, component, &linker).await?;
 
-    // Find the exported function.
-    let func = if let Some(func) = instance.get_func(&mut store, function) {
-        func
-    } else {
-        find_function_in_exports(engine, component, &instance, &mut store, function)?
-    };
-
-    tracing::debug!(function = %function, "Invoking component function");
-
-    // Get the function's type to determine parameter and result types
-    let func_ty = func.ty(&store);
-    let param_types: Vec<(String, Type)> = func_ty
-        .params()
-        .map(|(name, ty)| (name.to_string(), ty))
-        .collect();
-    let result_types: Vec<Type> = func_ty.results().collect();
-
-    // Parse wasm-wave encoded arguments into typed Vals
-    if args.len() != param_types.len() {
-        return Err(anyhow!(
-            "function '{}' expects {} arguments but got {}",
-            function,
-            param_types.len(),
-            args.len()
-        ));
+    // Call init
+    let init_result = actor_process.call_init(&mut store, init_msg).await?;
+    if let Err(ref err_bytes) = init_result {
+        let err_msg = String::from_utf8_lossy(err_bytes).to_string();
+        registry
+            .exit_process(
+                &pid,
+                ExitReason::Exception(format!("init failed: {}", err_msg)),
+            )
+            .await;
+        return Err(anyhow!("init failed: {}", err_msg));
     }
 
-    let params: Vec<Val> = args
-        .iter()
-        .zip(param_types.iter())
-        .map(|(wave_str, (_name, ty))| {
-            wasm_wave::from_str::<Val>(ty, wave_str).map_err(|e| {
-                anyhow!(
-                    "failed to parse argument '{}' as {}: {}",
-                    wave_str,
-                    wasm_wave::wasm::DisplayType(ty),
-                    e
-                )
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    // Prepare result slots
-    let mut results: Vec<Val> = result_types
-        .iter()
-        .map(|_| Val::Bool(false))
-        .collect();
-
-    // Call the function
-    func.call_async(&mut store, &params, &mut results).await?;
-
-    // Post-return cleanup (required by component model)
-    func.post_return_async(&mut store).await?;
-
-    // Encode results as wasm-wave strings
-    let wave_results: Vec<String> = results
-        .iter()
-        .map(|val| {
-            wasm_wave::to_string(val)
-                .map_err(|e| anyhow!("failed to encode result: {}", e))
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    Ok(wave_results)
-}
-
-/// Search for a function export by walking the component's export tree.
-fn find_function_in_exports(
-    engine: &Engine,
-    component: &Component,
-    instance: &wasmtime::component::Instance,
-    store: &mut wasmtime::Store<HostState>,
-    function_name: &str,
-) -> Result<wasmtime::component::Func> {
-    let component_type = component.component_type();
-
-    for (export_name, item) in component_type.exports(engine) {
-        match item {
-            ComponentItem::ComponentInstance(ci) => {
-                for (func_name, func_item) in ci.exports(engine) {
-                    if func_name == function_name {
-                        if let ComponentItem::ComponentFunc(_) = func_item {
-                            let iface_index = component
-                                .get_export_index(None, export_name)
-                                .ok_or_else(|| {
-                                    anyhow!(
-                                        "interface '{}' not found at runtime",
-                                        export_name
-                                    )
-                                })?;
-
-                            let func_index = component
-                                .get_export_index(Some(&iface_index), function_name)
-                                .ok_or_else(|| {
-                                    anyhow!(
-                                        "function '{}' not found in interface '{}'",
-                                        function_name,
-                                        export_name,
-                                    )
-                                })?;
-
-                            let func = instance
-                                .get_func(&mut *store, &func_index)
-                                .ok_or_else(|| {
-                                    anyhow!(
-                                        "function '{}' in '{}' could not be resolved",
-                                        function_name,
-                                        export_name,
-                                    )
-                                })?;
-
-                            return Ok(func);
-                        }
-                    }
-                }
-            }
-            ComponentItem::ComponentFunc(_) => {
-                if export_name == function_name {
-                    if let Some(func) = instance.get_func(&mut *store, export_name) {
-                        return Ok(func);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    Err(anyhow!(
-        "function '{}' not found in any exported interface",
-        function_name,
-    ))
-}
-
-/// Add host functions to the linker based on capabilities.
-fn add_host_functions(linker: &mut Linker<HostState>, capabilities: &PolicySet) -> Result<()> {
-    // Add WASI interfaces (required by wasm32-wasip1 components)
-    wasmtime_wasi::p2::add_to_linker_async(linker)?;
-
-    // Add logging interface: plasmoid:runtime/logging@0.2.0
-    {
-        let mut logging = linker.instance("plasmoid:runtime/logging@0.2.0")?;
-
-        if capabilities.allows("logging") {
-            logging.func_wrap_async(
-                "log",
-                |caller: wasmtime::StoreContextMut<'_, HostState>,
-                 (level, message): (LogLevel, String)| {
-                    Box::new(async move {
-                        let state = caller.data();
-                        log_message(state, level, &message);
-                        Ok(())
-                    })
-                },
-            )?;
-        } else {
-            logging.func_wrap_async(
-                "log",
-                |_caller: wasmtime::StoreContextMut<'_, HostState>,
-                 (_level, _message): (LogLevel, String)| {
-                    Box::new(async move { Ok(()) })
-                },
-            )?;
-        }
-    }
-
-    // Add actor-context interface: plasmoid:runtime/actor-context@0.2.0
-    {
-        let mut context = linker.instance("plasmoid:runtime/actor-context@0.2.0")?;
-
-        // Register the pid resource type
-        context.resource(
-            "pid",
-            wasmtime::component::ResourceType::host::<Pid>(),
-            |_ctx, _rep| Ok(()),
-        )?;
-
-        // self-pid: func() -> pid
-        context.func_wrap_async(
-            "self-pid",
-            |mut caller: wasmtime::StoreContextMut<'_, HostState>,
-             _: ()| {
-                Box::new(async move {
-                    let pid = caller.data().pid().expect("self-pid called on particle without a PID").clone();
-                    let resource = caller.data_mut().resource_table_mut().push(pid)
-                        .map_err(|e| anyhow!("{}", e))?;
-                    Ok((resource,))
-                })
-            },
-        )?;
-
-        // self-name: func() -> option<string>
-        context.func_wrap_async(
-            "self-name",
-            |caller: wasmtime::StoreContextMut<'_, HostState>,
-             _: ()| {
-                Box::new(async move {
-                    let name = caller.data().particle_name().map(|s| s.to_string());
-                    Ok((name,))
-                })
-            },
-        )?;
-
-        // caller-pid: func() -> option<pid>
-        context.func_wrap_async(
-            "caller-pid",
-            |mut caller: wasmtime::StoreContextMut<'_, HostState>,
-             _: ()| {
-                Box::new(async move {
-                    let resource = if let Some(pid) = caller.data().remote_pid().cloned() {
-                        Some(caller.data_mut().resource_table_mut().push(pid)
-                            .map_err(|e| anyhow!("{}", e))?)
-                    } else {
-                        None
-                    };
-                    Ok((resource,))
-                })
-            },
-        )?;
-
-        // spawn: func(component: string, name: option<string>) -> result<pid, string>
-        context.func_wrap_async(
-            "spawn",
-            |mut caller: wasmtime::StoreContextMut<'_, HostState>,
-             (component, name): (String, Option<String>)| {
-                Box::new(async move {
-                    let registry = match caller.data().registry() {
-                        Some(r) => r.clone(),
-                        None => {
-                            return Ok((Err("no registry available for spawn".to_string()),));
-                        }
-                    };
-
-                    let result = registry.spawn(&component, name.as_deref(), None).await;
-
-                    match result {
-                        Ok(pid) => {
-                            let resource = caller.data_mut().resource_table_mut().push(pid)
-                                .map_err(|e| anyhow!("{}", e))?;
-                            Ok((Ok(resource),))
-                        }
-                        Err(e) => Ok((Err(e.to_string()),)),
-                    }
-                })
-            },
-        )?;
-
-        // call: func(target: string, function: string, args: list<string>) -> result<list<string>, string>
-        context.func_wrap_async(
-            "call",
-            |caller: wasmtime::StoreContextMut<'_, HostState>,
-             (target, function, args): (String, String, Vec<String>)| {
-                Box::new(async move {
-                    if !caller.data().capabilities().allows("actor:call") {
-                        return Ok((Err("unauthorized: actor:call not permitted".to_string()),));
-                    }
-
-                    let engine = match caller.data().engine() {
-                        Some(e) => e.clone(),
-                        None => {
-                            return Ok((Err("no engine available for actor-to-actor calls".to_string()),));
-                        }
-                    };
-
-                    let registry = caller.data().registry().cloned();
-                    let doc_registry = caller.data().doc_registry().cloned();
-                    let endpoint = caller.data().endpoint().cloned();
-                    let caller_id = caller.data().particle_id().to_string();
-
-                    let result = dispatch_call(
-                        &engine,
-                        registry.as_ref(),
-                        doc_registry.as_ref(),
-                        endpoint.as_ref(),
-                        &caller_id,
-                        &target,
-                        &function,
-                        &args,
-                    )
-                    .await;
-
-                    match result {
-                        Ok(results) => Ok((Ok(results),)),
-                        Err(e) => Ok((Err(e.to_string()),)),
-                    }
-                })
-            },
-        )?;
-
-        // notify: func(target: string, function: string, args: list<string>) -> result<_, string>
-        context.func_wrap_async(
-            "notify",
-            |caller: wasmtime::StoreContextMut<'_, HostState>,
-             (target, function, args): (String, String, Vec<String>)| {
-                Box::new(async move {
-                    if !caller.data().capabilities().allows("actor:notify") {
-                        return Ok((Err("unauthorized: actor:notify not permitted".to_string()),));
-                    }
-
-                    let engine = match caller.data().engine() {
-                        Some(e) => e.clone(),
-                        None => {
-                            return Ok((Err(
-                                "no engine available for actor-to-actor calls".to_string(),
-                            ),));
-                        }
-                    };
-
-                    let registry = caller.data().registry().cloned();
-                    let doc_registry = caller.data().doc_registry().cloned();
-                    let endpoint = caller.data().endpoint().cloned();
-                    let caller_id = caller.data().particle_id().to_string();
-
-                    // Fire-and-forget: spawn a background task for the invocation
-                    tokio::spawn(async move {
-                        let result = dispatch_call(
-                            &engine,
-                            registry.as_ref(),
-                            doc_registry.as_ref(),
-                            endpoint.as_ref(),
-                            &caller_id,
-                            &target,
-                            &function,
-                            &args,
-                        )
-                        .await;
-
-                        match result {
-                            Ok(_) => {}
-                            Err(e) => {
-                                tracing::warn!(error = %e, "notify dispatch failed");
-                            }
-                        }
-                    });
-
-                    Ok((Ok(()),))
-                })
-            },
-        )?;
-
-        // send: func(target: pid, message: list<string>) -> result<_, string>
-        context.func_wrap_async(
-            "send",
-            |caller: wasmtime::StoreContextMut<'_, HostState>,
-             (target, message): (Resource<Pid>, Vec<String>)| {
-                Box::new(async move {
-                    if !caller.data().capabilities().allows("actor:send") {
-                        return Ok((Err("unauthorized: actor:send not permitted".to_string()),));
-                    }
-
-                    let pid = caller.data().resource_table().get(&target)
-                        .map_err(|e| anyhow!("{}", e))?
-                        .clone();
-
-                    let registry = match caller.data().registry() {
-                        Some(r) => r.clone(),
-                        None => {
-                            return Ok((Err("no registry available for send".to_string()),));
-                        }
-                    };
-
-                    let result = registry.send_to_pid(&pid, message).await;
-
-                    match result {
-                        Ok(()) => Ok((Ok(()),)),
-                        Err(e) => Ok((Err(e.to_string()),)),
-                    }
-                })
-            },
-        )?;
-
-        // receive: func() -> list<string>
-        context.func_wrap_async(
-            "receive",
-            |caller: wasmtime::StoreContextMut<'_, HostState>,
-             _: ()| {
-                Box::new(async move {
-                    let pid = match caller.data().pid() {
-                        Some(pid) => pid.clone(),
-                        None => {
-                            return Ok((vec!["error: no mailbox (particle not spawned)".to_string()],));
-                        }
-                    };
-
-                    let registry = match caller.data().registry() {
-                        Some(r) => r.clone(),
-                        None => {
-                            return Ok((vec!["error: no registry available".to_string()],));
-                        }
-                    };
-
-                    match registry.receive_message(&pid).await {
-                        Ok(msg) => Ok((msg,)),
-                        Err(e) => Ok((vec![format!("error: {}", e)],)),
-                    }
-                })
-            },
-        )?;
-
-        // resolve: func(pid-string: string) -> option<pid>
-        context.func_wrap_async(
-            "resolve",
-            |mut caller: wasmtime::StoreContextMut<'_, HostState>,
-             (pid_string,): (String,)| {
-                Box::new(async move {
-                    let registry = match caller.data().registry() {
-                        Some(r) => r.clone(),
-                        None => return Ok((None::<Resource<Pid>>,)),
-                    };
-
-                    match registry.resolve_target(&pid_string).await {
-                        Some(pid) => {
-                            let resource = caller.data_mut().resource_table_mut().push(pid)
-                                .map_err(|e| anyhow!("{}", e))?;
-                            Ok((Some(resource),))
-                        }
-                        None => Ok((None,)),
-                    }
-                })
-            },
-        )?;
-
-        // [method]pid.to-string: func(self: pid) -> string
-        context.func_wrap_async(
-            "[method]pid.to-string",
-            |caller: wasmtime::StoreContextMut<'_, HostState>,
-             (self_,): (Resource<Pid>,)| {
-                Box::new(async move {
-                    let pid = caller.data().resource_table().get(&self_)
-                        .map_err(|e| anyhow!("{}", e))?;
-                    Ok((pid.to_string(),))
-                })
-            },
-        )?;
-    }
+    // Spawn the message loop as a background task
+    let pid_for_loop = pid.clone();
+    let registry_for_loop = registry.clone();
+    tokio::spawn(async move {
+        message_loop(
+            actor_process,
+            store,
+            receivers,
+            pid_for_loop,
+            registry_for_loop,
+        )
+        .await;
+    });
 
     Ok(())
 }
 
-/// Dispatch a call: resolve the target locally or remotely.
-///
-/// 1. Check local registry by name
-/// 2. If doc registry exists, check for remote particles
-/// 3. Local -> direct WASM invocation
-/// 4. Remote -> QUIC call to remote node
-async fn dispatch_call(
-    engine: &Engine,
-    registry: Option<&Arc<ParticleRegistry>>,
-    doc_registry: Option<&Arc<DocRegistry>>,
-    endpoint: Option<&Endpoint>,
-    caller_id: &str,
-    target: &str,
-    function: &str,
-    args: &[String],
-) -> Result<Vec<String>> {
-    // Try local resolution first (by name or PID string)
-    if let Some(registry) = registry {
-        if let Some(pid) = registry.resolve_target(target).await {
-            if let Some(particle) = registry.get_by_pid(&pid).await {
-                return invoke_component(
-                    engine,
-                    &particle.component,
-                    &particle.capabilities,
-                    &particle.name.unwrap_or_else(|| particle.pid.to_string()),
-                    Some(particle.pid),
-                    Some(caller_id.to_string()),
-                    function,
-                    args,
-                    endpoint.cloned(),
-                    Some(registry.clone()),
-                    doc_registry.map(|r| r.clone()),
-                )
-                .await;
-            }
-        }
-    }
+/// The message loop: receives user and system messages and calls handle.
+async fn message_loop(
+    actor_process: ActorProcess,
+    mut store: wasmtime::Store<HostState>,
+    receivers: MailboxReceivers,
+    pid: Pid,
+    registry: Arc<ParticleRegistry>,
+) {
+    let MailboxReceivers {
+        mut user_rx,
+        mut system_rx,
+    } = receivers;
 
-    // Try doc registry resolution
-    if let Some(doc_registry) = doc_registry {
-        if let Some(resolved) = doc_registry.resolve_name(target).await {
-            match resolved {
-                ResolvedParticle::Local(pid) => {
-                    // Shouldn't happen (we checked local first), but handle it
-                    if let Some(registry) = registry {
-                        if let Some(particle) = registry.get_by_pid(&pid).await {
-                            return invoke_component(
-                                engine,
-                                &particle.component,
-                                &particle.capabilities,
-                                &particle.name.unwrap_or_else(|| particle.pid.to_string()),
-                                Some(particle.pid),
-                                Some(caller_id.to_string()),
-                                function,
-                                args,
-                                endpoint.cloned(),
-                                Some(registry.clone()),
-                                Some(doc_registry.clone()),
-                            )
-                            .await;
-                        }
+    loop {
+        tokio::select! {
+            biased;
+
+            Some(sys_msg) = system_rx.recv() => {
+                // Convert SystemMessage to WIT message variant
+                let wit_msg = match system_message_to_wit(
+                    sys_msg,
+                    store.data_mut().resource_table_mut(),
+                ) {
+                    Ok(msg) => msg,
+                    Err(e) => {
+                        tracing::error!(pid = %pid, error = %e, "Failed to convert system message");
+                        continue;
                     }
-                }
-                ResolvedParticle::Remote(remote) => {
-                    let endpoint = endpoint
-                        .ok_or_else(|| anyhow!("no endpoint available for remote call"))?;
-                    return remote_call(
-                        endpoint,
-                        &remote,
-                        target,
-                        function,
-                        args,
-                    )
-                    .await;
+                };
+
+                // Call handle export
+                if let Err(e) = actor_process.call_handle(&mut store, &wit_msg).await {
+                    tracing::error!(pid = %pid, error = %e, "handle trapped on system message");
+                    registry
+                        .exit_process(&pid, ExitReason::Exception(format!("handle trap: {}", e)))
+                        .await;
+                    return;
                 }
             }
+
+            Some(user_bytes) = user_rx.recv() => {
+                // Wrap as Message::User(bytes)
+                let wit_msg = plasmoid::runtime::process::Message::User(user_bytes);
+
+                // Call handle export
+                if let Err(e) = actor_process.call_handle(&mut store, &wit_msg).await {
+                    tracing::error!(pid = %pid, error = %e, "handle trapped on user message");
+                    registry
+                        .exit_process(&pid, ExitReason::Exception(format!("handle trap: {}", e)))
+                        .await;
+                    return;
+                }
+            }
+
+            else => break,
         }
     }
 
-    Err(anyhow!("no particle found with name '{}'", target))
-}
-
-/// Perform a remote call via QUIC.
-async fn remote_call(
-    endpoint: &Endpoint,
-    remote: &crate::doc_registry::RemoteParticle,
-    target: &str,
-    function: &str,
-    args: &[String],
-) -> Result<Vec<String>> {
-    let conn = endpoint
-        .connect(remote.addr.clone(), PLASMOID_ALPN)
-        .await
-        .map_err(|e| anyhow!("failed to connect to remote node: {}", e))?;
-
-    let (mut send, mut recv) = conn
-        .open_bi()
-        .await
-        .map_err(|e| anyhow!("failed to open stream: {}", e))?;
-
-    let request = wire::CallRequest {
-        id: 0,
-        target: wire::Target::Name(target.to_string()),
-        function: function.to_string(),
-        args: args.to_vec(),
-    };
-
-    let command = wire::Command::Call(request);
-    let request_bytes = wire::serialize(&command)
-        .map_err(|e| anyhow!("failed to serialize command: {}", e))?;
-
-    send.write_all(&request_bytes).await?;
-    send.finish()?;
-
-    let response_bytes = recv.read_to_end(1024 * 1024).await?;
-    let response: wire::CommandResponse = wire::deserialize(&response_bytes)
-        .map_err(|e| anyhow!("failed to deserialize response: {}", e))?;
-
-    match response {
-        wire::CommandResponse::Call(call_response) => call_response
-            .result
-            .map_err(|e| anyhow!("particle returned error: {}", e)),
-        other => Err(anyhow!("unexpected response type: expected Call, got {:?}", other)),
-    }
+    // Loop exited (channels closed) -- process cleanup
+    registry.exit_process(&pid, ExitReason::Normal).await;
 }
