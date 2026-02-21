@@ -241,6 +241,18 @@ impl ParticleRegistry {
             .map_err(|_| anyhow!("mailbox closed for '{}'", target))
     }
 
+    /// Send a message directly by Pid -- no string resolution. O(1).
+    pub async fn send_to_pid(&self, pid: &Pid, message: Vec<String>) -> Result<()> {
+        let mailboxes = self.mailboxes.read().await;
+        let handle = mailboxes
+            .get(pid)
+            .ok_or_else(|| anyhow!("no mailbox for pid '{}'", pid))?;
+        handle
+            .tx
+            .send(message)
+            .map_err(|_| anyhow!("mailbox closed for pid '{}'", pid))
+    }
+
     /// Block until a message arrives in the particle's mailbox.
     pub async fn receive_message(&self, pid: &Pid) -> Result<Vec<String>> {
         let rx = {

@@ -133,4 +133,12 @@ impl HostState {
     pub fn set_doc_registry(&mut self, doc_registry: Option<Arc<DocRegistry>>) {
         self.doc_registry = doc_registry;
     }
+
+    pub fn resource_table(&self) -> &ResourceTable {
+        &self.resource_table
+    }
+
+    pub fn resource_table_mut(&mut self) -> &mut ResourceTable {
+        &mut self.resource_table
+    }
 }

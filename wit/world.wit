@@ -13,26 +13,35 @@ interface logging {
 }
 
 interface actor-context {
-    /// Get this process's PID (e.g. "<a3f7bc12.1>")
-    self-pid: func() -> string;
+    resource pid {
+        /// Display representation, e.g. "<ec47b34e.1>"
+        to-string: func() -> string;
+    }
 
-    /// Get this process's registered name, if any
+    /// Resolve a PID string back to a typed handle.
+    resolve: func(pid-string: string) -> option<pid>;
+
+    /// Get this particle's PID.
+    self-pid: func() -> pid;
+
+    /// Get this particle's registered name, if any.
     self-name: func() -> option<string>;
 
-    /// Get the caller's PID, if known
-    caller-pid: func() -> option<string>;
+    /// Get the caller's PID, if known.
+    caller-pid: func() -> option<pid>;
 
-    /// Call a function on another process by name or PID and await the response.
-    /// target: the name or PID string of the target process
-    /// function: the function name to call
-    /// args: wasm-wave encoded arguments
-    /// Returns wasm-wave encoded results
+    /// Call a function on another particle by name and await the response.
     call: func(target: string, function: string, args: list<string>) -> result<list<string>, string>;
 
-    /// Send a message to another process with no response.
+    /// Fire-and-forget function invocation on another particle by name.
     notify: func(target: string, function: string, args: list<string>) -> result<_, string>;
 
-    /// Spawn a new process from a registered behavior.
-    /// Returns the PID of the new process.
-    spawn: func(behavior: string, name: option<string>) -> result<string, string>;
+    /// Spawn a new particle from a registered component.
+    spawn: func(component: string, name: option<string>) -> result<pid, string>;
+
+    /// Deposit a message into a particle's mailbox. O(1) via resource handle.
+    send: func(target: borrow<pid>, message: list<string>) -> result<_, string>;
+
+    /// Block until a message arrives in this particle's mailbox.
+    receive: func() -> list<string>;
 }

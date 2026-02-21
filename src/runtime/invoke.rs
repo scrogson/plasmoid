@@ -14,7 +14,7 @@ use anyhow::{anyhow, Result};
 use iroh::Endpoint;
 use std::sync::Arc;
 use wasmtime::component::types::ComponentItem;
-use wasmtime::component::{Component, Linker, Type, Val};
+use wasmtime::component::{Component, Linker, Resource, Type, Val};
 use wasmtime::Engine;
 
 /// Invoke a function on a WASM component instance.
@@ -220,17 +220,23 @@ fn add_host_functions(linker: &mut Linker<HostState>, capabilities: &PolicySet) 
     {
         let mut context = linker.instance("plasmoid:runtime/actor-context@0.2.0")?;
 
-        // self-pid: func() -> string
+        // Register the pid resource type
+        context.resource(
+            "pid",
+            wasmtime::component::ResourceType::host::<Pid>(),
+            |_ctx, _rep| Ok(()),
+        )?;
+
+        // self-pid: func() -> pid
         context.func_wrap_async(
             "self-pid",
-            |caller: wasmtime::StoreContextMut<'_, HostState>,
+            |mut caller: wasmtime::StoreContextMut<'_, HostState>,
              _: ()| {
                 Box::new(async move {
-                    let id = match caller.data().pid() {
-                        Some(pid) => pid.to_string(),
-                        None => caller.data().particle_id().to_string(),
-                    };
-                    Ok((id,))
+                    let pid = caller.data().pid().expect("self-pid called on particle without a PID").clone();
+                    let resource = caller.data_mut().resource_table_mut().push(pid)
+                        .map_err(|e| anyhow!("{}", e))?;
+                    Ok((resource,))
                 })
             },
         )?;
@@ -247,22 +253,27 @@ fn add_host_functions(linker: &mut Linker<HostState>, capabilities: &PolicySet) 
             },
         )?;
 
-        // caller-pid: func() -> option<string>
+        // caller-pid: func() -> option<pid>
         context.func_wrap_async(
             "caller-pid",
-            |caller: wasmtime::StoreContextMut<'_, HostState>,
+            |mut caller: wasmtime::StoreContextMut<'_, HostState>,
              _: ()| {
                 Box::new(async move {
-                    let id = caller.data().remote_node_id().cloned();
-                    Ok((id,))
+                    let resource = if let Some(pid) = caller.data().remote_pid().cloned() {
+                        Some(caller.data_mut().resource_table_mut().push(pid)
+                            .map_err(|e| anyhow!("{}", e))?)
+                    } else {
+                        None
+                    };
+                    Ok((resource,))
                 })
             },
         )?;
 
-        // spawn: func(component: string, name: option<string>) -> result<string, string>
+        // spawn: func(component: string, name: option<string>) -> result<pid, string>
         context.func_wrap_async(
             "spawn",
-            |caller: wasmtime::StoreContextMut<'_, HostState>,
+            |mut caller: wasmtime::StoreContextMut<'_, HostState>,
              (component, name): (String, Option<String>)| {
                 Box::new(async move {
                     let registry = match caller.data().registry() {
@@ -275,7 +286,11 @@ fn add_host_functions(linker: &mut Linker<HostState>, capabilities: &PolicySet) 
                     let result = registry.spawn(&component, name.as_deref(), None).await;
 
                     match result {
-                        Ok(pid) => Ok((Ok(pid.to_string()),)),
+                        Ok(pid) => {
+                            let resource = caller.data_mut().resource_table_mut().push(pid)
+                                .map_err(|e| anyhow!("{}", e))?;
+                            Ok((Ok(resource),))
+                        }
                         Err(e) => Ok((Err(e.to_string()),)),
                     }
                 })
@@ -375,15 +390,19 @@ fn add_host_functions(linker: &mut Linker<HostState>, capabilities: &PolicySet) 
             },
         )?;
 
-        // send: func(target: string, message: list<string>) -> result<_, string>
+        // send: func(target: pid, message: list<string>) -> result<_, string>
         context.func_wrap_async(
             "send",
             |caller: wasmtime::StoreContextMut<'_, HostState>,
-             (target, message): (String, Vec<String>)| {
+             (target, message): (Resource<Pid>, Vec<String>)| {
                 Box::new(async move {
                     if !caller.data().capabilities().allows("actor:send") {
                         return Ok((Err("unauthorized: actor:send not permitted".to_string()),));
                     }
+
+                    let pid = caller.data().resource_table().get(&target)
+                        .map_err(|e| anyhow!("{}", e))?
+                        .clone();
 
                     let registry = match caller.data().registry() {
                         Some(r) => r.clone(),
@@ -392,7 +411,7 @@ fn add_host_functions(linker: &mut Linker<HostState>, capabilities: &PolicySet) 
                         }
                     };
 
-                    let result = registry.send_message(&target, message).await;
+                    let result = registry.send_to_pid(&pid, message).await;
 
                     match result {
                         Ok(()) => Ok((Ok(()),)),
@@ -426,6 +445,42 @@ fn add_host_functions(linker: &mut Linker<HostState>, capabilities: &PolicySet) 
                         Ok(msg) => Ok((msg,)),
                         Err(e) => Ok((vec![format!("error: {}", e)],)),
                     }
+                })
+            },
+        )?;
+
+        // resolve: func(pid-string: string) -> option<pid>
+        context.func_wrap_async(
+            "resolve",
+            |mut caller: wasmtime::StoreContextMut<'_, HostState>,
+             (pid_string,): (String,)| {
+                Box::new(async move {
+                    let registry = match caller.data().registry() {
+                        Some(r) => r.clone(),
+                        None => return Ok((None::<Resource<Pid>>,)),
+                    };
+
+                    match registry.resolve_target(&pid_string).await {
+                        Some(pid) => {
+                            let resource = caller.data_mut().resource_table_mut().push(pid)
+                                .map_err(|e| anyhow!("{}", e))?;
+                            Ok((Some(resource),))
+                        }
+                        None => Ok((None,)),
+                    }
+                })
+            },
+        )?;
+
+        // [method]pid.to-string: func(self: pid) -> string
+        context.func_wrap_async(
+            "[method]pid.to-string",
+            |caller: wasmtime::StoreContextMut<'_, HostState>,
+             (self_,): (Resource<Pid>,)| {
+                Box::new(async move {
+                    let pid = caller.data().resource_table().get(&self_)
+                        .map_err(|e| anyhow!("{}", e))?;
+                    Ok((pid.to_string(),))
                 })
             },
         )?;
