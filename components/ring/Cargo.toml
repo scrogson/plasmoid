@@ -14,7 +14,7 @@ package = "plasmoid:ring"
 
 [package.metadata.component.target]
 path = "../../wit/components/ring"
-world = "ring-world"
+world = "ring"
 
 [package.metadata.component.target.dependencies]
 "plasmoid:runtime" = { path = "../../wit/components/ring/deps/runtime" }
