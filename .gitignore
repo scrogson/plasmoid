@@ -2,3 +2,4 @@
 /target
 /docs/plans/
 **/bindings.rs
+components/*/Cargo.lock
