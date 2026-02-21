@@ -10,7 +10,7 @@ use wasmtime::component::Component;
 use wasmtime::Engine;
 
 /// Mailbox capacity for the bounded user message channel.
-const MAILBOX_CAPACITY: usize = 1024;
+const DEFAULT_MAILBOX_CAPACITY: usize = 1024;
 
 /// A compiled component (WASM component) that can be spawned as particles.
 pub struct ComponentTemplate {
@@ -105,7 +105,7 @@ impl ParticleRegistry {
         name: Option<&str>,
         capabilities: Option<PolicySet>,
     ) -> Result<(Pid, MailboxReceivers)> {
-        // Check name uniqueness
+        // Check name uniqueness early, under write lock for atomicity
         if let Some(name) = name {
             let names = self.names.read().await;
             if names.contains_key(name) {
@@ -130,7 +130,7 @@ impl ParticleRegistry {
         };
 
         // Create bounded user channel + unbounded system channel
-        let (user_tx, user_rx) = mpsc::channel(MAILBOX_CAPACITY);
+        let (user_tx, user_rx) = mpsc::channel(DEFAULT_MAILBOX_CAPACITY);
         let (system_tx, system_rx) = mpsc::unbounded_channel();
 
         let process_state = ProcessState {
@@ -149,11 +149,16 @@ impl ParticleRegistry {
             .await
             .insert(pid.clone(), process_state);
 
+        // Atomically insert name (re-check under write lock to prevent TOCTOU race)
         if let Some(name) = name {
-            self.names
-                .write()
-                .await
-                .insert(name.to_string(), pid.clone());
+            let mut names = self.names.write().await;
+            if names.contains_key(name) {
+                // Another spawn raced us — roll back
+                self.process_states.write().await.remove(&pid);
+                self.particles.write().await.remove(&pid);
+                return Err(anyhow!("name '{}' is already registered", name));
+            }
+            names.insert(name.to_string(), pid.clone());
         }
 
         tracing::info!(
@@ -381,13 +386,17 @@ impl ParticleRegistry {
         Ok(())
     }
 
-    /// Unregister a name.
-    pub async fn unregister_name(&self, name: &str) -> Result<()> {
+    /// Unregister a name. Only the owning process can unregister it.
+    pub async fn unregister_name(&self, pid: &Pid, name: &str) -> Result<()> {
         let mut names = self.names.write().await;
-        if names.remove(name).is_none() {
-            return Err(anyhow!("name '{}' is not registered", name));
+        match names.get(name) {
+            Some(registered_pid) if registered_pid == pid => {
+                names.remove(name);
+                Ok(())
+            }
+            Some(_) => Err(anyhow!("name '{}' is registered to a different process", name)),
+            None => Err(anyhow!("name '{}' is not registered", name)),
         }
-        Ok(())
     }
 
     /// Look up a PID by name.
@@ -555,7 +564,7 @@ mod tests {
     async fn spawn_test_process(registry: &ParticleRegistry) -> (Pid, MailboxReceivers) {
         let pid = registry.pid_gen().next();
 
-        let (user_tx, user_rx) = mpsc::channel(MAILBOX_CAPACITY);
+        let (user_tx, user_rx) = mpsc::channel(DEFAULT_MAILBOX_CAPACITY);
         let (system_tx, system_rx) = mpsc::unbounded_channel();
 
         let process_state = ProcessState {
@@ -617,7 +626,7 @@ mod tests {
         let (pid, _receivers) = spawn_test_process(&registry).await;
 
         // Fill the mailbox to capacity
-        for i in 0..MAILBOX_CAPACITY {
+        for i in 0..DEFAULT_MAILBOX_CAPACITY {
             let msg = vec![i as u8];
             registry.send_to_pid(&pid, msg).await.unwrap();
         }
@@ -736,12 +745,16 @@ mod tests {
         let result = registry.register_name(&pid2, "test_proc").await;
         assert!(result.is_err());
 
-        // Unregister
-        registry.unregister_name("test_proc").await.unwrap();
+        // Unregister by wrong process should fail
+        let result = registry.unregister_name(&pid2, "test_proc").await;
+        assert!(result.is_err());
+
+        // Unregister by owner should succeed
+        registry.unregister_name(&pid, "test_proc").await.unwrap();
         assert_eq!(registry.lookup_name("test_proc").await, None);
 
         // Unregister nonexistent should fail
-        let result = registry.unregister_name("test_proc").await;
+        let result = registry.unregister_name(&pid, "test_proc").await;
         assert!(result.is_err());
     }
 

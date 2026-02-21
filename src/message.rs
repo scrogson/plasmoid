@@ -15,7 +15,7 @@ impl ExitReason {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SystemMessage {
     Exit { from: Pid, reason: ExitReason },
     Down { from: Pid, monitor_ref: u64, reason: ExitReason },

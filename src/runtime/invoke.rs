@@ -192,8 +192,9 @@ impl plasmoid::runtime::process::Host for HostState {
             Some(r) => r.clone(),
             None => return Ok(Err(plasmoid::runtime::process::RegistryError::NotRegistered)),
         };
+        let my_pid = self.pid().clone();
         let result = registry
-            .unregister_name(&name)
+            .unregister_name(&my_pid, &name)
             .await
             .map_err(|_| plasmoid::runtime::process::RegistryError::NotRegistered);
         Ok(result)
