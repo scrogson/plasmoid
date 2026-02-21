@@ -1,6 +1,7 @@
 pub mod client;
 pub mod doc_registry;
 pub mod host;
+pub mod mailbox;
 pub mod message;
 pub mod pid;
 pub mod policy;

@@ -204,7 +204,7 @@ impl Runtime {
     ///
     /// `component` is the module name (used to register the code).
     /// `name` is an optional registered name for the spawned particle.
-    /// `init_msg` is the message passed to the component's `init` export.
+    /// `init_args` is the wasm-wave string passed to the component's `start` export.
     /// Returns the PID of the spawned particle.
     pub async fn deploy(
         &self,
@@ -212,11 +212,11 @@ impl Runtime {
         wasm_bytes: &[u8],
         name: Option<&str>,
         capabilities: PolicySet,
-        init_msg: &[u8],
+        init_args: &str,
     ) -> Result<Pid> {
         self.load(component, wasm_bytes, capabilities.clone())
             .await?;
-        self.spawn(component, name, Some(capabilities), init_msg)
+        self.spawn(component, name, Some(capabilities), init_args)
             .await
     }
 
@@ -226,7 +226,7 @@ impl Runtime {
         component: &str,
         name: Option<&str>,
         capabilities: Option<PolicySet>,
-        init_msg: &[u8],
+        init_args: &str,
     ) -> Result<Pid> {
         // Look up the component template
         let (comp, default_caps) = self
@@ -237,21 +237,21 @@ impl Runtime {
 
         let caps = capabilities.unwrap_or(default_caps);
 
-        // Spawn in the registry (creates channels)
-        let (pid, receivers) = self
+        // Spawn in the registry (creates mailbox)
+        let (pid, mailbox) = self
             .registry
             .spawn(component, name, Some(caps.clone()))
             .await?;
 
-        // Start the process (init + message loop)
+        // Start the process (calls component's start function)
         start_process(
             &self.engine,
             &comp,
             &caps,
             pid.clone(),
             name.map(|s| s.to_string()),
-            init_msg,
-            receivers,
+            init_args,
+            mailbox,
             Some(self.endpoint.clone()),
             self.registry.clone(),
             Some(self.doc_registry.clone()),

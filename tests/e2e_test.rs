@@ -50,7 +50,7 @@ async fn test_echo_lifecycle() {
 
     // Spawn an echo particle with a name
     let pid = runtime
-        .spawn("echo", Some("test-echo"), None, &[])
+        .spawn("echo", Some("test-echo"), None, "")
         .await
         .unwrap();
 
@@ -130,12 +130,12 @@ async fn test_echo_reply() {
 
     // Spawn two echo particles -- one will act as the "sender"
     let echo_pid = runtime
-        .spawn("echo", Some("echo-server"), None, &[])
+        .spawn("echo", Some("echo-server"), None, "")
         .await
         .unwrap();
 
     let sender_pid = runtime
-        .spawn("echo", Some("echo-client"), None, &[])
+        .spawn("echo", Some("echo-client"), None, "")
         .await
         .unwrap();
 

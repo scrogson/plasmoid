@@ -1,4 +1,4 @@
-package plasmoid:runtime@0.3.0;
+package plasmoid:runtime@0.4.0;
 
 interface process {
     resource pid {
@@ -8,10 +8,17 @@ interface process {
     self-pid: func() -> pid;
     self-name: func() -> option<string>;
 
-    spawn: func(component: string, name: option<string>, init-msg: list<u8>) -> result<pid, spawn-error>;
+    make-ref: func() -> u64;
+
+    spawn: func(component: string, name: option<string>, init-args: string) -> result<pid, spawn-error>;
     exit: func(reason: exit-reason);
 
     send: func(target: borrow<pid>, msg: list<u8>) -> result<_, send-error>;
+    send-ref: func(target: borrow<pid>, ref: u64, msg: list<u8>) -> result<_, send-error>;
+
+    recv: func(timeout-ms: option<u64>) -> option<message>;
+    recv-ref: func(ref: u64, timeout-ms: option<u64>) -> option<message>;
+
     resolve: func(pid-string: string) -> option<pid>;
 
     register: func(name: string) -> result<_, registry-error>;
@@ -20,13 +27,11 @@ interface process {
 
     link: func(target: borrow<pid>) -> result<_, link-error>;
     unlink: func(target: borrow<pid>);
-    monitor: func(target: borrow<pid>) -> monitor-ref;
-    demonitor: func(ref: monitor-ref);
+    monitor: func(target: borrow<pid>) -> u64;
+    demonitor: func(ref: u64);
     trap-exit: func(enabled: bool);
 
     log: func(level: log-level, message: string);
-
-    type monitor-ref = u64;
 
     enum log-level { trace, debug, info, warn, error }
 
@@ -44,12 +49,18 @@ interface process {
 
     record down-signal {
         sender: pid,
-        monitor-ref: monitor-ref,
+        ref: u64,
         reason: exit-reason,
     }
 
+    record tagged-message {
+        ref: u64,
+        payload: list<u8>,
+    }
+
     variant message {
-        user(list<u8>),
+        data(list<u8>),
+        tagged(tagged-message),
         exit(exit-signal),
         down(down-signal),
     }
@@ -75,11 +86,6 @@ interface process {
     }
 }
 
-world actor-process {
+world particle {
     import process;
-
-    use process.{message};
-
-    export init: func(msg: list<u8>) -> result<_, list<u8>>;
-    export handle: func(msg: message);
 }

@@ -25,12 +25,12 @@ impl NodeClient {
         &self,
         component: &str,
         name: Option<&str>,
-        init_msg: &[u8],
+        init_args: &str,
     ) -> Result<SpawnResult> {
         let command = Command::Spawn(SpawnRequest {
             component: component.to_string(),
             name: name.map(|s| s.to_string()),
-            init_msg: init_msg.to_vec(),
+            init_args: init_args.to_string(),
         });
 
         let response = self.send_command(&command).await?;

@@ -22,12 +22,12 @@ Usage:
                                              (default: ~/.config/plasmoid)
         --load-path <dir>                    Load all .wasm files from directory
         --peer <node-id>                     Bootstrap peer for cluster sync
-        --spawn <component> [--name <name>] [--init <hex>]
+        --spawn <component> [--name <name>] [--init <wave-expr>]
                                              Spawn a particle after loading
 
       Component name is derived from the file stem (e.g. echo.wasm -> echo).
 
-  plasmoid spawn [--node <id>] <component> [--name <name>] [--init <hex>]
+  plasmoid spawn [--node <id>] <component> [--name <name>] [--init <wave-expr>]
       Spawn a particle on a running node. Prints the PID.
       Uses PLASMOID_NODE env var if --node not specified.
 
@@ -86,7 +86,7 @@ async fn main() -> Result<()> {
 struct SpawnSpec {
     component: String,
     name: Option<String>,
-    init_msg: Vec<u8>,
+    init_args: String,
 }
 
 fn default_data_dir() -> PathBuf {
@@ -97,15 +97,6 @@ fn default_data_dir() -> PathBuf {
     } else {
         PathBuf::from(".config/plasmoid")
     }
-}
-
-/// Parse a hex string into bytes. Returns empty vec for empty/missing input.
-fn parse_hex_init(hex_str: &str) -> Result<Vec<u8>> {
-    if hex_str.is_empty() {
-        return Ok(vec![]);
-    }
-    hex::decode(hex_str)
-        .map_err(|e| anyhow::anyhow!("invalid hex for --init: {}", e))
 }
 
 async fn cmd_start(args: &[String]) -> Result<()> {
@@ -159,7 +150,7 @@ async fn cmd_start(args: &[String]) -> Result<()> {
                 i += 2;
 
                 let mut name = None;
-                let mut init_msg = vec![];
+                let mut init_args = String::new();
 
                 // Parse optional --name and --init after --spawn <component>
                 while i < args.len() {
@@ -172,10 +163,10 @@ async fn cmd_start(args: &[String]) -> Result<()> {
                             i += 2;
                         }
                         "--init" => {
-                            let hex = args
+                            let wave = args
                                 .get(i + 1)
-                                .ok_or_else(|| anyhow::anyhow!("--init requires a hex value"))?;
-                            init_msg = parse_hex_init(hex)?;
+                                .ok_or_else(|| anyhow::anyhow!("--init requires a wasm-wave expression"))?;
+                            init_args = wave.clone();
                             i += 2;
                         }
                         _ => break,
@@ -185,7 +176,7 @@ async fn cmd_start(args: &[String]) -> Result<()> {
                 spawn_specs.push(SpawnSpec {
                     component,
                     name,
-                    init_msg,
+                    init_args,
                 });
             }
             arg if arg.ends_with(".wasm") => {
@@ -258,7 +249,7 @@ async fn cmd_start(args: &[String]) -> Result<()> {
                     &spec.component,
                     spec.name.as_deref(),
                     Some(PolicySet::all()),
-                    &spec.init_msg,
+                    &spec.init_args,
                 )
                 .await?;
             pids.push((pid, spec.component.clone(), spec.name.clone()));
@@ -307,7 +298,7 @@ async fn cmd_spawn(args: &[String]) -> Result<()> {
     i += 1;
 
     let mut name = None;
-    let mut init_msg: Vec<u8> = vec![];
+    let mut init_args = String::new();
 
     while i < args.len() {
         match args[i].as_str() {
@@ -319,10 +310,10 @@ async fn cmd_spawn(args: &[String]) -> Result<()> {
                 i += 2;
             }
             "--init" => {
-                let hex = args
+                let wave = args
                     .get(i + 1)
-                    .ok_or_else(|| anyhow::anyhow!("--init requires a hex value"))?;
-                init_msg = parse_hex_init(hex)?;
+                    .ok_or_else(|| anyhow::anyhow!("--init requires a wasm-wave expression"))?;
+                init_args = wave.clone();
                 i += 2;
             }
             other => {
@@ -354,7 +345,7 @@ async fn cmd_spawn(args: &[String]) -> Result<()> {
 
     let client = NodeClient::new(endpoint, node_id);
     let result = client
-        .spawn(&component, name.as_deref(), &init_msg)
+        .spawn(&component, name.as_deref(), &init_args)
         .await?;
 
     println!("{}", result.pid);
@@ -408,7 +399,7 @@ async fn cmd_send(args: &[String]) -> Result<()> {
 // Scaffolding commands
 // ---------------------------------------------------------------------------
 
-const RUNTIME_WIT: &str = r#"package plasmoid:runtime@0.3.0;
+const RUNTIME_WIT: &str = r#"package plasmoid:runtime@0.4.0;
 
 interface process {
     resource pid {
@@ -418,10 +409,17 @@ interface process {
     self-pid: func() -> pid;
     self-name: func() -> option<string>;
 
-    spawn: func(component: string, name: option<string>, init-msg: list<u8>) -> result<pid, spawn-error>;
+    make-ref: func() -> u64;
+
+    spawn: func(component: string, name: option<string>, init-args: string) -> result<pid, spawn-error>;
     exit: func(reason: exit-reason);
 
     send: func(target: borrow<pid>, msg: list<u8>) -> result<_, send-error>;
+    send-ref: func(target: borrow<pid>, ref: u64, msg: list<u8>) -> result<_, send-error>;
+
+    recv: func(timeout-ms: option<u64>) -> option<message>;
+    recv-ref: func(ref: u64, timeout-ms: option<u64>) -> option<message>;
+
     resolve: func(pid-string: string) -> option<pid>;
 
     register: func(name: string) -> result<_, registry-error>;
@@ -430,13 +428,11 @@ interface process {
 
     link: func(target: borrow<pid>) -> result<_, link-error>;
     unlink: func(target: borrow<pid>);
-    monitor: func(target: borrow<pid>) -> monitor-ref;
-    demonitor: func(ref: monitor-ref);
+    monitor: func(target: borrow<pid>) -> u64;
+    demonitor: func(ref: u64);
     trap-exit: func(enabled: bool);
 
     log: func(level: log-level, message: string);
-
-    type monitor-ref = u64;
 
     enum log-level { trace, debug, info, warn, error }
 
@@ -454,12 +450,18 @@ interface process {
 
     record down-signal {
         sender: pid,
-        monitor-ref: monitor-ref,
+        ref: u64,
         reason: exit-reason,
     }
 
+    record tagged-message {
+        ref: u64,
+        payload: list<u8>,
+    }
+
     variant message {
-        user(list<u8>),
+        data(list<u8>),
+        tagged(tagged-message),
         exit(exit-signal),
         down(down-signal),
     }
@@ -485,13 +487,8 @@ interface process {
     }
 }
 
-world actor-process {
+world particle {
     import process;
-
-    use process.{message};
-
-    export init: func(msg: list<u8>) -> result<_, list<u8>>;
-    export handle: func(msg: message);
 }
 "#;
 
@@ -662,7 +659,7 @@ package = "{namespace}:{name}"
 
 [package.metadata.component.target]
 path = "../../wit/components/{name}"
-world = "actor-process"
+world = "{name_underscored}"
 
 [package.metadata.component.target.dependencies]
 "plasmoid:runtime" = {{ path = "../../wit/components/{name}/deps/runtime" }}
@@ -680,21 +677,19 @@ use bindings::plasmoid::runtime::process;
 struct {pascal_name};
 
 impl bindings::Guest for {pascal_name} {{
-    fn init(msg: Vec<u8>) -> Result<(), Vec<u8>> {{
-        process::log(process::LogLevel::Info, &format!("{name_underscored} initialized with {{}} bytes", msg.len()));
-        Ok(())
-    }}
-
-    fn handle(msg: bindings::plasmoid::runtime::process::Message) {{
-        match msg {{
-            bindings::plasmoid::runtime::process::Message::User(data) => {{
-                process::log(process::LogLevel::Info, &format!("{name_underscored} received {{}} bytes", data.len()));
-            }}
-            bindings::plasmoid::runtime::process::Message::Exit(signal) => {{
-                process::log(process::LogLevel::Warn, &format!("{name_underscored} received exit signal"));
-            }}
-            bindings::plasmoid::runtime::process::Message::Down(signal) => {{
-                process::log(process::LogLevel::Warn, &format!("{name_underscored} received down signal"));
+    fn start() -> Result<(), String> {{
+        process::log(process::LogLevel::Info, "{name_underscored} started");
+        loop {{
+            match process::recv(None) {{
+                Some(process::Message::Data(data)) => {{
+                    if data == b"stop" {{
+                        return Ok(());
+                    }}
+                    process::log(process::LogLevel::Info, &format!("{name_underscored} received {{}} bytes", data.len()));
+                }}
+                Some(process::Message::Exit(_)) | Some(process::Message::Down(_)) => {{}}
+                Some(process::Message::Tagged(_)) => {{}}
+                None => return Ok(()),
             }}
         }}
     }}
@@ -705,13 +700,13 @@ bindings::export!({pascal_name} with_types_in bindings);
     );
     std::fs::write(component_dir.join("src/lib.rs"), lib_rs)?;
 
-    // wit/components/<name>/<name>.wit -- just re-export the actor-process world
-    // The component uses the runtime's actor-process world directly
+    // wit/components/<name>/<name>.wit
     let component_wit = format!(
         r#"package {namespace}:{name}@0.1.0;
 
 world {name_underscored} {{
-    include plasmoid:runtime/actor-process@0.3.0;
+    include plasmoid:runtime/particle@0.4.0;
+    export start: func() -> result<_, string>;
 }}
 "#
     );

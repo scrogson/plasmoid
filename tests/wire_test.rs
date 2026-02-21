@@ -59,7 +59,7 @@ fn test_roundtrip_command_spawn() {
     let cmd = Command::Spawn(SpawnRequest {
         component: "echo_actor".to_string(),
         name: Some("echo".to_string()),
-        init_msg: b"init data".to_vec(),
+        init_args: "init data".to_string(),
     });
 
     let bytes = serialize(&cmd).unwrap();
@@ -73,7 +73,7 @@ fn test_roundtrip_command_spawn_no_name() {
     let cmd = Command::Spawn(SpawnRequest {
         component: "echo_actor".to_string(),
         name: None,
-        init_msg: vec![],
+        init_args: String::new(),
     });
 
     let bytes = serialize(&cmd).unwrap();

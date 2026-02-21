@@ -1,8 +1,10 @@
 use crate::doc_registry::DocRegistry;
+use crate::mailbox::Mailbox;
 use crate::pid::Pid;
 use crate::policy::PolicySet;
 use crate::registry::ParticleRegistry;
 use iroh::Endpoint;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use wasmtime::Engine;
 use wasmtime::component::ResourceTable;
@@ -17,6 +19,8 @@ pub struct HostState {
     engine: Option<Engine>,
     registry: Option<Arc<ParticleRegistry>>,
     doc_registry: Option<Arc<DocRegistry>>,
+    mailbox: Option<Arc<Mailbox>>,
+    next_ref: AtomicU64,
     wasi_ctx: WasiCtx,
     resource_table: ResourceTable,
 }
@@ -50,6 +54,8 @@ impl HostState {
             engine: None,
             registry: None,
             doc_registry: None,
+            mailbox: None,
+            next_ref: AtomicU64::new(1),
             wasi_ctx: WasiCtxBuilder::new().build(),
             resource_table: ResourceTable::new(),
         }
@@ -101,6 +107,18 @@ impl HostState {
 
     pub fn set_doc_registry(&mut self, doc_registry: Option<Arc<DocRegistry>>) {
         self.doc_registry = doc_registry;
+    }
+
+    pub fn mailbox(&self) -> Option<&Arc<Mailbox>> {
+        self.mailbox.as_ref()
+    }
+
+    pub fn set_mailbox(&mut self, mailbox: Option<Arc<Mailbox>>) {
+        self.mailbox = mailbox;
+    }
+
+    pub fn next_ref(&self) -> u64 {
+        self.next_ref.fetch_add(1, Ordering::Relaxed)
     }
 
     pub fn resource_table(&self) -> &ResourceTable {

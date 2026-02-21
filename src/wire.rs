@@ -29,7 +29,7 @@ pub struct SendResponse {
 pub struct SpawnRequest {
     pub component: String,
     pub name: Option<String>,
-    pub init_msg: Vec<u8>,
+    pub init_args: String,
 }
 
 /// The result of a successful spawn.

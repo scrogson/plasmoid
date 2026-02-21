@@ -1,5 +1,6 @@
 package plasmoid:ring@0.1.0;
 
 world ring {
-    include plasmoid:runtime/actor-process@0.3.0;
+    include plasmoid:runtime/particle@0.4.0;
+    export start: func(init-args: string) -> result<_, string>;
 }

@@ -1,3 +1,4 @@
+use crate::mailbox::Mailbox;
 use crate::message::{ExitReason, SystemMessage};
 use crate::pid::{Pid, PidGenerator};
 use crate::policy::PolicySet;
@@ -5,12 +6,10 @@ use crate::runtime::WasmActor;
 use anyhow::{anyhow, Result};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::{mpsc, RwLock};
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use wasmtime::component::Component;
 use wasmtime::Engine;
-
-/// Mailbox capacity for the bounded user message channel.
-const DEFAULT_MAILBOX_CAPACITY: usize = 1024;
 
 /// A compiled component (WASM component) that can be spawned as particles.
 pub struct ComponentTemplate {
@@ -26,21 +25,13 @@ pub struct ParticleEntry {
     pub name: Option<String>,
 }
 
-/// Per-process state: links, monitors, mailbox channels.
+/// Per-process state: links, monitors, mailbox.
 pub struct ProcessState {
     pub links: HashSet<Pid>,
     pub monitors: HashMap<u64, Pid>,
     pub monitored_by: Vec<(Pid, u64)>,
     pub trap_exit: bool,
-    pub user_tx: mpsc::Sender<Vec<u8>>,
-    pub system_tx: mpsc::UnboundedSender<SystemMessage>,
-}
-
-/// Receiving ends of the mailbox channels, returned from spawn.
-#[derive(Debug)]
-pub struct MailboxReceivers {
-    pub user_rx: mpsc::Receiver<Vec<u8>>,
-    pub system_rx: mpsc::UnboundedReceiver<SystemMessage>,
+    pub mailbox: Arc<Mailbox>,
 }
 
 /// Local particle registry -- manages components and running particle instances.
@@ -53,7 +44,7 @@ pub struct ParticleRegistry {
     pub(crate) names: RwLock<HashMap<String, Pid>>,
     components: RwLock<HashMap<String, ComponentTemplate>>,
     process_states: RwLock<HashMap<Pid, ProcessState>>,
-    next_monitor_ref: AtomicU64,
+    next_ref: AtomicU64,
 }
 
 impl std::fmt::Debug for ParticleRegistry {
@@ -71,7 +62,7 @@ impl ParticleRegistry {
             names: RwLock::new(HashMap::new()),
             components: RwLock::new(HashMap::new()),
             process_states: RwLock::new(HashMap::new()),
-            next_monitor_ref: AtomicU64::new(1),
+            next_ref: AtomicU64::new(1),
         }
     }
 
@@ -97,14 +88,14 @@ impl ParticleRegistry {
 
     /// Spawn a new particle from a registered component, optionally with a name.
     ///
-    /// Returns (Pid, MailboxReceivers) -- the caller owns the receivers and runs
-    /// the message loop.
+    /// Returns (Pid, Arc<Mailbox>) -- the caller owns the mailbox reference and starts
+    /// the component's `start` function with it.
     pub async fn spawn(
         &self,
         component: &str,
         name: Option<&str>,
         capabilities: Option<PolicySet>,
-    ) -> Result<(Pid, MailboxReceivers)> {
+    ) -> Result<(Pid, Arc<Mailbox>)> {
         // Check name uniqueness early, under write lock for atomicity
         if let Some(name) = name {
             let names = self.names.read().await;
@@ -129,17 +120,15 @@ impl ParticleRegistry {
             name: name.map(|s| s.to_string()),
         };
 
-        // Create bounded user channel + unbounded system channel
-        let (user_tx, user_rx) = mpsc::channel(DEFAULT_MAILBOX_CAPACITY);
-        let (system_tx, system_rx) = mpsc::unbounded_channel();
+        // Create unified mailbox
+        let mailbox = Arc::new(Mailbox::with_default_capacity());
 
         let process_state = ProcessState {
             links: HashSet::new(),
             monitors: HashMap::new(),
             monitored_by: Vec::new(),
             trap_exit: false,
-            user_tx,
-            system_tx,
+            mailbox: mailbox.clone(),
         };
 
         // Insert into registries
@@ -168,13 +157,7 @@ impl ParticleRegistry {
             "Particle spawned"
         );
 
-        Ok((
-            pid,
-            MailboxReceivers {
-                user_rx,
-                system_rx,
-            },
-        ))
+        Ok((pid, mailbox))
     }
 
     /// Look up a particle by PID.
@@ -257,19 +240,37 @@ impl ParticleRegistry {
         None
     }
 
-    /// Send a user message to a process by PID. Uses bounded channel with try_send.
+    /// Send a user message to a process by PID.
     pub async fn send_to_pid(&self, pid: &Pid, msg: Vec<u8>) -> Result<(), SendError> {
         let states = self.process_states.read().await;
         let state = states
             .get(pid)
             .ok_or(SendError::NoProcess)?;
-        state
-            .user_tx
-            .try_send(msg)
-            .map_err(|e| match e {
-                mpsc::error::TrySendError::Full(_) => SendError::MailboxFull,
-                mpsc::error::TrySendError::Closed(_) => SendError::NoProcess,
-            })
+        let mailbox = state.mailbox.clone();
+        drop(states);
+        mailbox.push_data(msg).await.map_err(|e| match e {
+            crate::mailbox::SendError::NoProcess => SendError::NoProcess,
+            crate::mailbox::SendError::MailboxFull => SendError::MailboxFull,
+        })
+    }
+
+    /// Send a tagged message to a process by PID.
+    pub async fn send_tagged_to_pid(
+        &self,
+        pid: &Pid,
+        ref_id: u64,
+        msg: Vec<u8>,
+    ) -> Result<(), SendError> {
+        let states = self.process_states.read().await;
+        let state = states
+            .get(pid)
+            .ok_or(SendError::NoProcess)?;
+        let mailbox = state.mailbox.clone();
+        drop(states);
+        mailbox.push_tagged(ref_id, msg).await.map_err(|e| match e {
+            crate::mailbox::SendError::NoProcess => SendError::NoProcess,
+            crate::mailbox::SendError::MailboxFull => SendError::MailboxFull,
+        })
     }
 
     /// Send a system message to a process.
@@ -278,10 +279,10 @@ impl ParticleRegistry {
         let state = states
             .get(pid)
             .ok_or_else(|| anyhow!("no process for pid '{}'", pid))?;
-        state
-            .system_tx
-            .send(msg)
-            .map_err(|_| anyhow!("system channel closed for pid '{}'", pid))
+        let mailbox = state.mailbox.clone();
+        drop(states);
+        mailbox.push_system(msg).await;
+        Ok(())
     }
 
     /// Create a bidirectional link between two processes.
@@ -315,17 +316,19 @@ impl ParticleRegistry {
 
     /// Monitor a target process. Returns a monitor reference.
     pub async fn monitor(&self, watcher: &Pid, target: &Pid) -> Result<u64> {
-        let monitor_ref = self.next_monitor_ref.fetch_add(1, Ordering::Relaxed);
+        let monitor_ref = self.next_ref.fetch_add(1, Ordering::Relaxed);
         let mut states = self.process_states.write().await;
 
         // If target doesn't exist, immediately deliver a Down signal
         if !states.contains_key(target) {
             if let Some(watcher_state) = states.get(watcher) {
-                let _ = watcher_state.system_tx.send(SystemMessage::Down {
+                let mailbox = watcher_state.mailbox.clone();
+                drop(states);
+                mailbox.push_system(SystemMessage::Down {
                     from: target.clone(),
                     monitor_ref,
                     reason: ExitReason::Normal,
-                });
+                }).await;
             }
             return Ok(monitor_ref);
         }
@@ -428,6 +431,9 @@ impl ParticleRegistry {
             None => return, // Already exited
         };
 
+        // Close the mailbox to wake any blocked recv
+        process_state.mailbox.close().await;
+
         // Remove particle entry
         {
             let entry = self.particles.write().await.remove(pid);
@@ -451,6 +457,10 @@ impl ParticleRegistry {
         // We need to collect the peers to cascade-kill outside the lock
         let mut cascade_kills: Vec<Pid> = Vec::new();
 
+        // Collect mailboxes to deliver to outside the lock
+        let mut exit_deliveries: Vec<Arc<Mailbox>> = Vec::new();
+        let mut down_deliveries: Vec<(Arc<Mailbox>, u64)> = Vec::new();
+
         {
             let mut states = self.process_states.write().await;
 
@@ -461,10 +471,7 @@ impl ParticleRegistry {
 
                     if peer_state.trap_exit {
                         // Deliver Exit system message
-                        let _ = peer_state.system_tx.send(SystemMessage::Exit {
-                            from: pid.clone(),
-                            reason: propagated_reason.clone(),
-                        });
+                        exit_deliveries.push(peer_state.mailbox.clone());
                     } else if propagated_reason.is_abnormal() {
                         // Will cascade kill
                         cascade_kills.push(linked_pid.clone());
@@ -478,13 +485,26 @@ impl ParticleRegistry {
                 if let Some(watcher_state) = states.get_mut(watcher_pid) {
                     // Clean up the watcher's monitors map
                     watcher_state.monitors.remove(monitor_ref);
-                    let _ = watcher_state.system_tx.send(SystemMessage::Down {
-                        from: pid.clone(),
-                        monitor_ref: *monitor_ref,
-                        reason: propagated_reason.clone(),
-                    });
+                    down_deliveries.push((watcher_state.mailbox.clone(), *monitor_ref));
                 }
             }
+        }
+
+        // Deliver exit signals outside the lock
+        for mailbox in exit_deliveries {
+            mailbox.push_system(SystemMessage::Exit {
+                from: pid.clone(),
+                reason: propagated_reason.clone(),
+            }).await;
+        }
+
+        // Deliver down signals outside the lock
+        for (mailbox, monitor_ref) in down_deliveries {
+            mailbox.push_system(SystemMessage::Down {
+                from: pid.clone(),
+                monitor_ref,
+                reason: propagated_reason.clone(),
+            }).await;
         }
 
         // Step 3 (continued): Cascade kills outside the lock to avoid deadlock
@@ -545,7 +565,7 @@ mod tests {
     use super::*;
     use crate::pid::PidGenerator;
     use iroh::SecretKey;
-    use std::sync::Arc;
+    use std::time::Duration;
 
     fn make_engine() -> Engine {
         let mut config = wasmtime::Config::new();
@@ -561,19 +581,17 @@ mod tests {
     }
 
     /// Helper to create a process state directly for testing (no WASM needed).
-    async fn spawn_test_process(registry: &ParticleRegistry) -> (Pid, MailboxReceivers) {
+    async fn spawn_test_process(registry: &ParticleRegistry) -> (Pid, Arc<Mailbox>) {
         let pid = registry.pid_gen().next();
 
-        let (user_tx, user_rx) = mpsc::channel(DEFAULT_MAILBOX_CAPACITY);
-        let (system_tx, system_rx) = mpsc::unbounded_channel();
+        let mailbox = Arc::new(Mailbox::with_default_capacity());
 
         let process_state = ProcessState {
             links: HashSet::new(),
             monitors: HashMap::new(),
             monitored_by: Vec::new(),
             trap_exit: false,
-            user_tx,
-            system_tx,
+            mailbox: mailbox.clone(),
         };
 
         registry
@@ -582,17 +600,11 @@ mod tests {
             .await
             .insert(pid.clone(), process_state);
 
-        (
-            pid,
-            MailboxReceivers {
-                user_rx,
-                system_rx,
-            },
-        )
+        (pid, mailbox)
     }
 
     #[tokio::test]
-    async fn test_spawn_returns_receivers() {
+    async fn test_spawn_returns_mailbox() {
         let key = SecretKey::generate(&mut rand::rng());
         let node = key.public();
         let engine = make_engine();
@@ -600,14 +612,14 @@ mod tests {
 
         // We can't easily create a real WASM component in a unit test,
         // but we verify the process_states bookkeeping via spawn_test_process.
-        let (pid, _receivers) = spawn_test_process(&registry).await;
+        let (pid, _mailbox) = spawn_test_process(&registry).await;
         assert!(registry.process_exists(&pid).await);
     }
 
     #[tokio::test]
     async fn test_send_and_receive() {
         let registry = make_registry();
-        let (pid, mut receivers) = spawn_test_process(&registry).await;
+        let (pid, mailbox) = spawn_test_process(&registry).await;
 
         // Send a message
         registry
@@ -616,17 +628,20 @@ mod tests {
             .unwrap();
 
         // Receive it
-        let msg = receivers.user_rx.recv().await.unwrap();
-        assert_eq!(msg, b"hello");
+        let msg = mailbox.recv(Some(Duration::from_millis(100))).await.unwrap();
+        match msg {
+            crate::mailbox::MailboxMessage::Data(data) => assert_eq!(data, b"hello"),
+            other => panic!("expected Data, got {:?}", other),
+        }
     }
 
     #[tokio::test]
     async fn test_bounded_mailbox_full() {
         let registry = make_registry();
-        let (pid, _receivers) = spawn_test_process(&registry).await;
+        let (pid, _mailbox) = spawn_test_process(&registry).await;
 
-        // Fill the mailbox to capacity
-        for i in 0..DEFAULT_MAILBOX_CAPACITY {
+        // Fill the mailbox to capacity (default 1024)
+        for i in 0..1024 {
             let msg = vec![i as u8];
             registry.send_to_pid(&pid, msg).await.unwrap();
         }
@@ -639,8 +654,8 @@ mod tests {
     #[tokio::test]
     async fn test_link_and_exit_propagation() {
         let registry = make_registry();
-        let (pid_a, _recv_a) = spawn_test_process(&registry).await;
-        let (pid_b, _recv_b) = spawn_test_process(&registry).await;
+        let (pid_a, _mailbox_a) = spawn_test_process(&registry).await;
+        let (pid_b, _mailbox_b) = spawn_test_process(&registry).await;
 
         // Link a and b
         registry.link(&pid_a, &pid_b).await.unwrap();
@@ -657,8 +672,8 @@ mod tests {
     #[tokio::test]
     async fn test_normal_exit_no_propagation() {
         let registry = make_registry();
-        let (pid_a, _recv_a) = spawn_test_process(&registry).await;
-        let (pid_b, _recv_b) = spawn_test_process(&registry).await;
+        let (pid_a, _mailbox_a) = spawn_test_process(&registry).await;
+        let (pid_b, _mailbox_b) = spawn_test_process(&registry).await;
 
         // Link a and b
         registry.link(&pid_a, &pid_b).await.unwrap();
@@ -673,8 +688,8 @@ mod tests {
     #[tokio::test]
     async fn test_trap_exit() {
         let registry = make_registry();
-        let (pid_a, _recv_a) = spawn_test_process(&registry).await;
-        let (pid_b, mut recv_b) = spawn_test_process(&registry).await;
+        let (pid_a, _mailbox_a) = spawn_test_process(&registry).await;
+        let (pid_b, mailbox_b) = spawn_test_process(&registry).await;
 
         // b traps exits
         registry.set_trap_exit(&pid_b, true).await;
@@ -691,9 +706,9 @@ mod tests {
         assert!(registry.process_exists(&pid_b).await);
 
         // b should have received an Exit system message
-        let sys_msg = recv_b.system_rx.recv().await.unwrap();
-        match sys_msg {
-            SystemMessage::Exit { from, reason } => {
+        let msg = mailbox_b.recv(Some(Duration::from_millis(100))).await.unwrap();
+        match msg {
+            crate::mailbox::MailboxMessage::Exit { from, reason } => {
                 assert_eq!(from, pid_a);
                 assert_eq!(reason, ExitReason::Exception("crash".into()));
             }
@@ -704,8 +719,8 @@ mod tests {
     #[tokio::test]
     async fn test_monitor_down() {
         let registry = make_registry();
-        let (target_pid, _recv_target) = spawn_test_process(&registry).await;
-        let (watcher_pid, mut recv_watcher) = spawn_test_process(&registry).await;
+        let (target_pid, _mailbox_target) = spawn_test_process(&registry).await;
+        let (watcher_pid, mailbox_watcher) = spawn_test_process(&registry).await;
 
         // Watcher monitors target
         let monitor_ref = registry.monitor(&watcher_pid, &target_pid).await.unwrap();
@@ -716,11 +731,11 @@ mod tests {
             .await;
 
         // Watcher should have received a Down system message
-        let sys_msg = recv_watcher.system_rx.recv().await.unwrap();
-        match sys_msg {
-            SystemMessage::Down {
+        let msg = mailbox_watcher.recv(Some(Duration::from_millis(100))).await.unwrap();
+        match msg {
+            crate::mailbox::MailboxMessage::Down {
                 from,
-                monitor_ref: ref_id,
+                ref_id,
                 reason,
             } => {
                 assert_eq!(from, target_pid);
@@ -734,14 +749,14 @@ mod tests {
     #[tokio::test]
     async fn test_register_unregister_name() {
         let registry = make_registry();
-        let (pid, _recv) = spawn_test_process(&registry).await;
+        let (pid, _mailbox) = spawn_test_process(&registry).await;
 
         // Register
         registry.register_name(&pid, "test_proc").await.unwrap();
         assert_eq!(registry.lookup_name("test_proc").await, Some(pid.clone()));
 
         // Duplicate registration should fail
-        let (pid2, _recv2) = spawn_test_process(&registry).await;
+        let (pid2, _mailbox2) = spawn_test_process(&registry).await;
         let result = registry.register_name(&pid2, "test_proc").await;
         assert!(result.is_err());
 
@@ -783,18 +798,18 @@ mod tests {
     #[tokio::test]
     async fn test_monitor_dead_process() {
         let registry = make_registry();
-        let (watcher_pid, mut recv_watcher) = spawn_test_process(&registry).await;
+        let (watcher_pid, mailbox_watcher) = spawn_test_process(&registry).await;
         let dead_pid = registry.pid_gen().next();
 
         // Monitor a process that doesn't exist
         let monitor_ref = registry.monitor(&watcher_pid, &dead_pid).await.unwrap();
 
         // Should immediately receive Down
-        let sys_msg = recv_watcher.system_rx.recv().await.unwrap();
-        match sys_msg {
-            SystemMessage::Down {
+        let msg = mailbox_watcher.recv(Some(Duration::from_millis(100))).await.unwrap();
+        match msg {
+            crate::mailbox::MailboxMessage::Down {
                 from,
-                monitor_ref: ref_id,
+                ref_id,
                 reason,
             } => {
                 assert_eq!(from, dead_pid);
@@ -808,8 +823,8 @@ mod tests {
     #[tokio::test]
     async fn test_kill_propagation() {
         let registry = make_registry();
-        let (pid_a, _recv_a) = spawn_test_process(&registry).await;
-        let (pid_b, mut recv_b) = spawn_test_process(&registry).await;
+        let (pid_a, _mailbox_a) = spawn_test_process(&registry).await;
+        let (pid_b, mailbox_b) = spawn_test_process(&registry).await;
 
         // b traps exits
         registry.set_trap_exit(&pid_b, true).await;
@@ -824,9 +839,9 @@ mod tests {
         assert!(registry.process_exists(&pid_b).await);
 
         // b should have received an Exit with Shutdown("killed")
-        let sys_msg = recv_b.system_rx.recv().await.unwrap();
-        match sys_msg {
-            SystemMessage::Exit { reason, .. } => {
+        let msg = mailbox_b.recv(Some(Duration::from_millis(100))).await.unwrap();
+        match msg {
+            crate::mailbox::MailboxMessage::Exit { reason, .. } => {
                 assert_eq!(reason, ExitReason::Shutdown("killed".into()));
             }
             other => panic!("expected Exit, got {:?}", other),

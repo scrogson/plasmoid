@@ -1,39 +1,34 @@
 //! WASM component invocation module.
 //!
-//! This module handles instantiating WASM components, calling their `init`
-//! export, and running the message loop that delivers user and system messages
-//! to the `handle` export.
+//! This module handles instantiating WASM components, calling their `start`
+//! export dynamically via `Func::call`, and providing `recv`/`recv-ref` host
+//! functions that let the component own its control flow.
 
 use crate::doc_registry::DocRegistry;
 use crate::host::HostState;
-use crate::message::{ExitReason, SystemMessage};
+use crate::mailbox::{Mailbox, MailboxMessage};
+use crate::message::ExitReason;
 pub use crate::pid::Pid;
 use crate::policy::PolicySet;
-use crate::registry::{MailboxReceivers, ParticleRegistry, SendError};
+use crate::registry::{ParticleRegistry, SendError};
 use anyhow::{anyhow, Result};
 use iroh::Endpoint;
 use std::sync::Arc;
-use wasmtime::component::Resource;
+use std::time::Duration;
+use wasmtime::component::{Resource, Val, types::ComponentItem};
 use wasmtime::Engine;
 
-// Generate typed bindings from the WIT world "actor-process".
+// Generate typed bindings from the WIT world "particle" (imports only).
 //
-// This generates:
-// - `ActorProcess` struct for instantiation and calling exports
+// The particle world has no exports, so bindgen generates:
 // - `plasmoid::runtime::process::Host` trait for import functions
 // - `plasmoid::runtime::process::HostPid` trait for pid resource methods
-// - Type aliases matching WIT types (Message, ExitReason, etc.)
-//
-// With `trappable` imports, all Host trait methods return `wasmtime::Result<T>`
-// instead of bare `T`, allowing host functions to trap on error.
+// - `Particle::add_to_linker` to wire up imports
 wasmtime::component::bindgen!({
     path: "wit",
-    world: "actor-process",
+    world: "particle",
     imports: {
         default: async | trappable,
-    },
-    exports: {
-        default: async,
     },
     with: {
         "plasmoid:runtime/process.pid": Pid,
@@ -63,11 +58,15 @@ impl plasmoid::runtime::process::Host for HostState {
         Ok(self.name().map(|s| s.to_string()))
     }
 
+    async fn make_ref(&mut self) -> wasmtime::Result<u64> {
+        Ok(self.next_ref())
+    }
+
     async fn spawn(
         &mut self,
         component: String,
         name: Option<String>,
-        init_msg: Vec<u8>,
+        init_args: String,
     ) -> wasmtime::Result<Result<Resource<Pid>, plasmoid::runtime::process::SpawnError>> {
         let registry = match self.registry() {
             Some(r) => r.clone(),
@@ -87,7 +86,7 @@ impl plasmoid::runtime::process::Host for HostState {
         };
 
         // Spawn the process in the registry
-        let (pid, receivers) = match registry
+        let (pid, mailbox) = match registry
             .spawn(&component, name.as_deref(), Some(caps.clone()))
             .await
         {
@@ -95,7 +94,7 @@ impl plasmoid::runtime::process::Host for HostState {
             Err(_) => return Ok(Err(plasmoid::runtime::process::SpawnError::InitFailed)),
         };
 
-        // Start the process (init + message loop)
+        // Start the process
         let pid_clone = pid.clone();
         let registry_clone = registry.clone();
         if let Err(e) = start_process(
@@ -104,8 +103,8 @@ impl plasmoid::runtime::process::Host for HostState {
             &caps,
             pid_clone,
             name,
-            &init_msg,
-            receivers,
+            &init_args,
+            mailbox,
             endpoint,
             registry_clone,
             doc_registry,
@@ -153,6 +152,66 @@ impl plasmoid::runtime::process::Host for HostState {
             SendError::MailboxFull => plasmoid::runtime::process::SendError::MailboxFull,
         });
         Ok(result)
+    }
+
+    async fn send_ref(
+        &mut self,
+        target: Resource<Pid>,
+        ref_id: u64,
+        msg: Vec<u8>,
+    ) -> wasmtime::Result<Result<(), plasmoid::runtime::process::SendError>> {
+        let pid = match self.resource_table().get(&target) {
+            Ok(p) => p.clone(),
+            Err(_) => return Ok(Err(plasmoid::runtime::process::SendError::NoProcess)),
+        };
+
+        let registry = match self.registry() {
+            Some(r) => r.clone(),
+            None => return Ok(Err(plasmoid::runtime::process::SendError::NoProcess)),
+        };
+
+        let result = registry.send_tagged_to_pid(&pid, ref_id, msg).await.map_err(|e| match e {
+            SendError::NoProcess => plasmoid::runtime::process::SendError::NoProcess,
+            SendError::MailboxFull => plasmoid::runtime::process::SendError::MailboxFull,
+        });
+        Ok(result)
+    }
+
+    async fn recv(
+        &mut self,
+        timeout_ms: Option<u64>,
+    ) -> wasmtime::Result<Option<plasmoid::runtime::process::Message>> {
+        let mailbox = match self.mailbox() {
+            Some(m) => m.clone(),
+            None => return Ok(None),
+        };
+
+        let timeout = timeout_ms.map(Duration::from_millis);
+        let msg = mailbox.recv(timeout).await;
+
+        match msg {
+            Some(mailbox_msg) => Ok(Some(mailbox_message_to_wit(mailbox_msg, self.resource_table_mut())?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn recv_ref(
+        &mut self,
+        ref_id: u64,
+        timeout_ms: Option<u64>,
+    ) -> wasmtime::Result<Option<plasmoid::runtime::process::Message>> {
+        let mailbox = match self.mailbox() {
+            Some(m) => m.clone(),
+            None => return Ok(None),
+        };
+
+        let timeout = timeout_ms.map(Duration::from_millis);
+        let msg = mailbox.recv_ref(ref_id, timeout).await;
+
+        match msg {
+            Some(mailbox_msg) => Ok(Some(mailbox_message_to_wit(mailbox_msg, self.resource_table_mut())?)),
+            None => Ok(None),
+        }
     }
 
     async fn resolve(&mut self, pid_string: String) -> wasmtime::Result<Option<Resource<Pid>>> {
@@ -329,13 +388,24 @@ fn internal_exit_reason_to_wit(reason: &ExitReason) -> plasmoid::runtime::proces
     }
 }
 
-/// Convert a SystemMessage to the WIT Message variant for calling handle.
-fn system_message_to_wit(
-    msg: SystemMessage,
+/// Convert a MailboxMessage to the WIT Message variant.
+fn mailbox_message_to_wit(
+    msg: MailboxMessage,
     resource_table: &mut wasmtime::component::ResourceTable,
 ) -> Result<plasmoid::runtime::process::Message> {
     match msg {
-        SystemMessage::Exit { from, reason } => {
+        MailboxMessage::Data(data) => {
+            Ok(plasmoid::runtime::process::Message::Data(data))
+        }
+        MailboxMessage::Tagged { ref_id, payload } => {
+            Ok(plasmoid::runtime::process::Message::Tagged(
+                plasmoid::runtime::process::TaggedMessage {
+                    ref_: ref_id,
+                    payload,
+                },
+            ))
+        }
+        MailboxMessage::Exit { from, reason } => {
             let sender_resource = resource_table.push(from)?;
             Ok(plasmoid::runtime::process::Message::Exit(
                 plasmoid::runtime::process::ExitSignal {
@@ -344,16 +414,12 @@ fn system_message_to_wit(
                 },
             ))
         }
-        SystemMessage::Down {
-            from,
-            monitor_ref,
-            reason,
-        } => {
+        MailboxMessage::Down { from, ref_id, reason } => {
             let sender_resource = resource_table.push(from)?;
             Ok(plasmoid::runtime::process::Message::Down(
                 plasmoid::runtime::process::DownSignal {
                     sender: sender_resource,
-                    monitor_ref,
+                    ref_: ref_id,
                     reason: internal_exit_reason_to_wit(&reason),
                 },
             ))
@@ -361,15 +427,58 @@ fn system_message_to_wit(
     }
 }
 
-/// Start a process: instantiate component, call init, run message loop.
+/// Parse wasm-wave init args against a component's start function parameter types.
+fn parse_wave_args(init_args: &str, param_types: &[wasmtime::component::types::Type]) -> Result<Vec<Val>> {
+    if param_types.is_empty() {
+        return Ok(vec![]);
+    }
+
+    if init_args.is_empty() && param_types.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // For single-param functions, parse the whole string as that type
+    if param_types.len() == 1 {
+        if init_args.is_empty() {
+            return Err(anyhow!("start function expects 1 argument but none provided"));
+        }
+        let val = wasm_wave::from_str::< Val>(&param_types[0], init_args)
+            .map_err(|e| anyhow!("failed to parse init args as wasm-wave: {}", e))?;
+        return Ok(vec![val]);
+    }
+
+    // For multi-param, parse as a tuple
+    // wasm-wave tuple format: (val1, val2, ...)
+    // We need to split and parse each individually
+    // For now, support comma-separated values
+    let parts: Vec<&str> = init_args.splitn(param_types.len(), ',').collect();
+    if parts.len() != param_types.len() {
+        return Err(anyhow!(
+            "start function expects {} arguments, got {}",
+            param_types.len(),
+            parts.len()
+        ));
+    }
+
+    let mut vals = Vec::with_capacity(param_types.len());
+    for (part, ty) in parts.iter().zip(param_types.iter()) {
+        let val = wasm_wave::from_str::<Val>(ty, part.trim())
+            .map_err(|e| anyhow!("failed to parse arg '{}': {}", part.trim(), e))?;
+        vals.push(val);
+    }
+
+    Ok(vals)
+}
+
+/// Start a process: instantiate component, find `start` export, call it.
 pub async fn start_process(
     engine: &Engine,
     component: &wasmtime::component::Component,
     capabilities: &PolicySet,
     pid: Pid,
     name: Option<String>,
-    init_msg: &[u8],
-    receivers: MailboxReceivers,
+    init_args: &str,
+    mailbox: Arc<Mailbox>,
     endpoint: Option<Endpoint>,
     registry: Arc<ParticleRegistry>,
     doc_registry: Option<Arc<DocRegistry>>,
@@ -380,6 +489,7 @@ pub async fn start_process(
     state.set_engine(Some(engine.clone()));
     state.set_registry(Some(registry.clone()));
     state.set_doc_registry(doc_registry);
+    state.set_mailbox(Some(mailbox));
 
     // Create store and linker
     let mut store = wasmtime::Store::new(engine, state);
@@ -389,100 +499,124 @@ pub async fn start_process(
     wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
 
     // Add the process interface imports (generated by bindgen!)
-    ActorProcess::add_to_linker::<HostState, wasmtime::component::HasSelf<HostState>>(&mut linker, |state: &mut HostState| state)?;
+    Particle::add_to_linker::<HostState, wasmtime::component::HasSelf<HostState>>(&mut linker, |state: &mut HostState| state)?;
 
     // Instantiate the component
-    let actor_process =
-        ActorProcess::instantiate_async(&mut store, component, &linker).await?;
+    let instance =
+        linker.instantiate_async(&mut store, component).await?;
 
-    // Call init
-    let init_result = actor_process.call_init(&mut store, init_msg).await?;
-    if let Err(ref err_bytes) = init_result {
-        let err_msg = String::from_utf8_lossy(err_bytes).to_string();
-        registry
-            .exit_process(
-                &pid,
-                ExitReason::Exception(format!("init failed: {}", err_msg)),
-            )
-            .await;
-        return Err(anyhow!("init failed: {}", err_msg));
-    }
+    // Find the `start` export function
+    // Components may nest exports in different ways, so we search for it
+    let start_func = find_start_export(&instance, &mut store, engine, component)?;
 
-    // Spawn the message loop as a background task
-    let pid_for_loop = pid.clone();
-    let registry_for_loop = registry.clone();
+    // Parse init_args against the start function's parameter types
+    let func_ty = start_func.ty(&store);
+    let param_types: Vec<_> = func_ty.params().map(|(_, ty)| ty).collect();
+    let args = if param_types.is_empty() && init_args.is_empty() {
+        vec![]
+    } else {
+        parse_wave_args(init_args, &param_types)?
+    };
+
+    // Determine result count for the call
+    let result_count = func_ty.results().count();
+    let mut results = vec![Val::Bool(false); result_count];
+
+    // Spawn the start function as a background task
+    let pid_for_task = pid.clone();
+    let registry_for_task = registry.clone();
     tokio::spawn(async move {
-        message_loop(
-            actor_process,
-            store,
-            receivers,
-            pid_for_loop,
-            registry_for_loop,
-        )
-        .await;
+        tracing::debug!(pid = %pid_for_task, "Calling start function");
+
+        match start_func.call_async(&mut store, &args, &mut results).await {
+            Ok(()) => {
+                // post_return is required by the component model
+                if let Err(e) = start_func.post_return_async(&mut store).await {
+                    tracing::error!(pid = %pid_for_task, error = %e, "post_return failed");
+                }
+
+                let exit_reason = interpret_start_result(&results);
+                registry_for_task.exit_process(&pid_for_task, exit_reason).await;
+            }
+            Err(e) => {
+                tracing::error!(pid = %pid_for_task, error = %e, "start function trapped");
+                registry_for_task
+                    .exit_process(
+                        &pid_for_task,
+                        ExitReason::Exception(format!("start trap: {}", e)),
+                    )
+                    .await;
+            }
+        }
     });
 
     Ok(())
 }
 
-/// The message loop: receives user and system messages and calls handle.
-async fn message_loop(
-    actor_process: ActorProcess,
-    mut store: wasmtime::Store<HostState>,
-    receivers: MailboxReceivers,
-    pid: Pid,
-    registry: Arc<ParticleRegistry>,
-) {
-    let MailboxReceivers {
-        mut user_rx,
-        mut system_rx,
-    } = receivers;
+/// Find the `start` export in the component instance.
+/// It may be a top-level function or nested in a component instance export.
+fn find_start_export(
+    instance: &wasmtime::component::Instance,
+    store: &mut wasmtime::Store<HostState>,
+    engine: &Engine,
+    component: &wasmtime::component::Component,
+) -> Result<wasmtime::component::Func> {
+    // Try direct top-level export first
+    if let Some(func) = instance.get_func(&mut *store, "start") {
+        return Ok(func);
+    }
 
-    loop {
-        tokio::select! {
-            biased;
-
-            Some(sys_msg) = system_rx.recv() => {
-                // Convert SystemMessage to WIT message variant
-                let wit_msg = match system_message_to_wit(
-                    sys_msg,
-                    store.data_mut().resource_table_mut(),
-                ) {
-                    Ok(msg) => msg,
-                    Err(e) => {
-                        tracing::error!(pid = %pid, error = %e, "Failed to convert system message");
-                        continue;
+    // Walk the component type's exports looking for a function named "start"
+    let component_type = component.component_type();
+    for (name, item) in component_type.exports(engine) {
+        match item {
+            ComponentItem::ComponentInstance(inst_type) => {
+                // Try to find "start" inside this nested instance
+                for (func_name, _) in inst_type.exports(engine) {
+                    if func_name == "start" {
+                        // Access via the instance export path: instance[name]["start"]
+                        if let Some(func) = instance.get_func(&mut *store, &format!("{name}/start")) {
+                            return Ok(func);
+                        }
                     }
-                };
-
-                // Call handle export
-                if let Err(e) = actor_process.call_handle(&mut store, &wit_msg).await {
-                    tracing::error!(pid = %pid, error = %e, "handle trapped on system message");
-                    registry
-                        .exit_process(&pid, ExitReason::Exception(format!("handle trap: {}", e)))
-                        .await;
-                    return;
                 }
             }
-
-            Some(user_bytes) = user_rx.recv() => {
-                // Wrap as Message::User(bytes)
-                let wit_msg = plasmoid::runtime::process::Message::User(user_bytes);
-
-                // Call handle export
-                if let Err(e) = actor_process.call_handle(&mut store, &wit_msg).await {
-                    tracing::error!(pid = %pid, error = %e, "handle trapped on user message");
-                    registry
-                        .exit_process(&pid, ExitReason::Exception(format!("handle trap: {}", e)))
-                        .await;
-                    return;
+            ComponentItem::CoreFunc(_) => {
+                if name == "start" {
+                    if let Some(func) = instance.get_func(&mut *store, "start") {
+                        return Ok(func);
+                    }
                 }
             }
-
-            else => break,
+            _ => {}
         }
     }
 
-    // Loop exited (channels closed) -- process cleanup
-    registry.exit_process(&pid, ExitReason::Normal).await;
+    Err(anyhow!("component does not export a 'start' function"))
+}
+
+/// Interpret the result of a start function call.
+/// If the result is `result<_, string>` and is Err, return Exception.
+/// Otherwise return Normal.
+fn interpret_start_result(results: &[Val]) -> ExitReason {
+    if results.is_empty() {
+        return ExitReason::Normal;
+    }
+
+    match &results[0] {
+        Val::Result(result_val) => {
+            match result_val {
+                Ok(_) => ExitReason::Normal,
+                Err(Some(val)) => {
+                    let err_msg = match val.as_ref() {
+                        Val::String(s) => s.to_string(),
+                        other => format!("{:?}", other),
+                    };
+                    ExitReason::Exception(format!("start failed: {}", err_msg))
+                }
+                Err(None) => ExitReason::Exception("start failed (no error details)".to_string()),
+            }
+        }
+        _ => ExitReason::Normal,
+    }
 }

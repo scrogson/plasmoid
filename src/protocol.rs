@@ -170,7 +170,7 @@ async fn handle_spawn(
     };
 
     // Spawn in registry
-    let (pid, receivers) = match registry
+    let (pid, mailbox) = match registry
         .spawn(&request.component, request.name.as_deref(), Some(caps.clone()))
         .await
     {
@@ -182,15 +182,15 @@ async fn handle_spawn(
         }
     };
 
-    // Start the process (init + message loop)
+    // Start the process (calls component's start function)
     if let Err(e) = start_process(
         &engine,
         &component,
         &caps,
         pid.clone(),
         request.name.clone(),
-        &request.init_msg,
-        receivers,
+        &request.init_args,
+        mailbox,
         Some(endpoint),
         registry.clone(),
         doc_registry.clone(),
