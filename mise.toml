@@ -19,20 +19,20 @@ description = "Build the echo WASM component"
 dir = "components/echo"
 run = """
 cargo component build --release
-cp target/wasm32-wasip1/release/echo_actor.wasm ../../target/debug/
+cp target/wasm32-wasip1/release/echo.wasm ../../target/debug/
 """
 
-[tasks."build:caller"]
-description = "Build the caller WASM component"
-dir = "components/caller"
+[tasks."build:ring"]
+description = "Build the ring WASM component"
+dir = "components/ring"
 run = """
 cargo component build --release
-cp target/wasm32-wasip1/release/caller_actor.wasm ../../target/debug/
+cp target/wasm32-wasip1/release/ring.wasm ../../target/debug/
 """
 
 [tasks."build:components"]
 description = "Build all WASM components"
-depends = ["build:echo", "build:caller"]
+depends = ["build:echo", "build:ring"]
 
 [tasks."build:all"]
 description = "Build plasmoid and all components"
@@ -48,24 +48,7 @@ description = "Start node A with echo component"
 depends = ["build:all"]
 run = """
 plasmoid start --data-dir ~/.config/plasmoid/node-a --load-path target/debug \
-  --spawn echo_actor --name echo
-"""
-
-[tasks."node:b"]
-description = "Start node B with caller component, peered to node A"
-depends = ["build:all"]
-run = """
-plasmoid start --data-dir ~/.config/plasmoid/node-b --load-path target/debug \
-  --peer $(cat ~/.config/plasmoid/node-a/node_id) \
-  --spawn caller_actor --name caller
-"""
-
-[tasks."build:ring"]
-description = "Build the ring WASM component"
-dir = "components/ring"
-run = """
-cargo component build --release
-cp target/wasm32-wasip1/release/ring.wasm ../../target/debug/
+  --spawn echo --name echo
 """
 
 [tasks."ring:node"]

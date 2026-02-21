@@ -1,5 +1,5 @@
 [package]
-name = "echo-actor"
+name = "echo"
 version = "0.1.0"
 edition = "2021"
 
@@ -10,11 +10,11 @@ crate-type = ["cdylib"]
 wit-bindgen-rt = "0.41"
 
 [package.metadata.component]
-package = "plasmoid:echo-actor"
+package = "plasmoid:echo"
 
 [package.metadata.component.target]
 path = "../../wit/components/echo"
-world = "echo-actor"
+world = "echo"
 
 [package.metadata.component.target.dependencies]
 "plasmoid:runtime" = { path = "../../wit/components/echo/deps/runtime" }

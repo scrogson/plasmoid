@@ -25,7 +25,7 @@ Usage:
         --spawn <component> [--name <name>] [--init <hex>]
                                              Spawn a particle after loading
 
-      Component name is derived from the file stem (e.g. echo_actor.wasm -> echo_actor).
+      Component name is derived from the file stem (e.g. echo.wasm -> echo).
 
   plasmoid spawn [--node <id>] <component> [--name <name>] [--init <hex>]
       Spawn a particle on a running node. Prints the PID.
@@ -38,10 +38,10 @@ Usage:
 Examples:
   plasmoid start --load-path target/debug
   plasmoid start --load-path target/debug --peer a3f7bc...
-  plasmoid start echo_actor.wasm --spawn echo_actor --name echo
-  plasmoid start --load-path target/debug --spawn echo_actor --name echo
-  plasmoid spawn --node a3f7bc... echo_actor --name echo
-  PLASMOID_NODE=a3f7bc... plasmoid spawn echo_actor --name echo
+  plasmoid start echo.wasm --spawn echo --name echo
+  plasmoid start --load-path target/debug --spawn echo --name echo
+  plasmoid spawn --node a3f7bc... echo --name echo
+  PLASMOID_NODE=a3f7bc... plasmoid spawn echo --name echo
   plasmoid send a3f7bc... echo \"hello world\"
   PLASMOID_NODE=a3f7bc... plasmoid send echo \"hello world\"
 ";

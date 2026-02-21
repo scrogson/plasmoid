@@ -1,16 +1,5 @@
 package plasmoid:echo@0.1.0;
 
-interface echo {
-    /// Echo a message back
-    echo: func(message: string) -> string;
-
-    /// Reverse a message
-    reverse: func(message: string) -> string;
-}
-
-world echo-actor {
-    export echo;
-
-    import plasmoid:runtime/logging@0.2.0;
-    import plasmoid:runtime/actor-context@0.2.0;
+world echo {
+    include plasmoid:runtime/actor-process@0.3.0;
 }
