@@ -442,7 +442,12 @@ fn parse_wave_args(init_args: &str, param_types: &[wasmtime::component::types::T
         if init_args.is_empty() {
             return Err(anyhow!("start function expects 1 argument but none provided"));
         }
-        let val = wasm_wave::from_str::< Val>(&param_types[0], init_args)
+        // String params pass through raw — components handle their own parsing
+        // (e.g., JSON via plasmoid_sdk::from_init_args)
+        if matches!(param_types[0], wasmtime::component::types::Type::String) {
+            return Ok(vec![Val::String(init_args.into())]);
+        }
+        let val = wasm_wave::from_str::<Val>(&param_types[0], init_args)
             .map_err(|e| anyhow!("failed to parse init args as wasm-wave: {}", e))?;
         return Ok(vec![val]);
     }

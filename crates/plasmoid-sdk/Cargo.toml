@@ -1,0 +1,11 @@
+[package]
+name = "plasmoid-sdk"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+plasmoid-macros = { path = "../plasmoid-macros" }
+postcard = { version = "1", features = ["alloc"] }
+serde = "1"
+serde_json = "1"
+wit-bindgen-rt = "0.41"
