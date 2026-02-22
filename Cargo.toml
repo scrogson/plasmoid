@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "crates/plasmoid-macros", "crates/plasmoid-sdk"]
+exclude = ["components/echo", "components/ring"]
+
 [package]
 name = "plasmoid"
 version = "0.1.0"
