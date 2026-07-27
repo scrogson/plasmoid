@@ -51,19 +51,38 @@ plasmoid start --data-dir ~/.config/plasmoid/node-a --load-path target/debug \
   --spawn echo --name echo
 """
 
+# Two-terminal workflow: leave ring:node running, then ring:run against it.
+# The benchmark runs entirely from its init args at spawn time -- the ring
+# component has no message-driven entry point -- so each run spawns a fresh
+# orchestrator particle rather than messaging a long-lived one.
+
 [tasks."ring:node"]
-description = "Start a node with the ring component"
+description = "Start a node hosting the ring component (leave running; use ring:run against it)"
 depends = ["build", "build:ring"]
 run = """
-plasmoid start target/debug/ring.wasm --spawn ring --name ring-bench
+plasmoid start target/debug/ring.wasm
 """
 
 [tasks."ring:run"]
-description = "Run the ring benchmark (usage: mise run ring:run -- <processes> <messages>)"
+description = "Run the ring benchmark against a node started by ring:node (usage: mise run ring:run -- <particles> <messages>)"
 run = """
 #!/usr/bin/env bash
+set -euo pipefail
 N="${1:-100}"
 M="${2:-100}"
 NODE_ID=$(cat ~/.config/plasmoid/node_id)
-PLASMOID_NODE="$NODE_ID" plasmoid call ring-bench run "$N" "$M"
+INIT=$(printf '{"orchestrator":[%s,%s]}' "$N" "$M")
+plasmoid spawn --node "$NODE_ID" ring --init "$INIT"
+"""
+
+[tasks."ring:bench"]
+description = "Run the ring benchmark on its own throwaway node; prints the result then stays up, Ctrl-C to stop (usage: mise run ring:bench -- <particles> <messages>)"
+depends = ["build", "build:ring"]
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+N="${1:-100}"
+M="${2:-100}"
+INIT=$(printf '{"orchestrator":[%s,%s]}' "$N" "$M")
+plasmoid start target/debug/ring.wasm --spawn ring --name ring-bench --init "$INIT"
 """
