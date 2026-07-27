@@ -149,10 +149,8 @@ fn expand_gen_server(impl_block: syn::ItemImpl) -> Result<TokenStream, syn::Erro
                 "handle_call" => {
                     has_handle_call = true;
                     // Extract request type from second param (after &mut self)
-                    if let Some(arg) = method.sig.inputs.iter().nth(1) {
-                        if let syn::FnArg::Typed(pat_type) = arg {
-                            call_req_ty = Some((*pat_type.ty).clone());
-                        }
+                    if let Some(syn::FnArg::Typed(pat_type)) = method.sig.inputs.iter().nth(1) {
+                        call_req_ty = Some((*pat_type.ty).clone());
                     }
                     // Extract reply type from return type
                     if let syn::ReturnType::Type(_, ty) = &method.sig.output {
@@ -161,10 +159,8 @@ fn expand_gen_server(impl_block: syn::ItemImpl) -> Result<TokenStream, syn::Erro
                 }
                 "handle_cast" => {
                     has_handle_cast = true;
-                    if let Some(arg) = method.sig.inputs.iter().nth(1) {
-                        if let syn::FnArg::Typed(pat_type) = arg {
-                            cast_msg_ty = Some((*pat_type.ty).clone());
-                        }
+                    if let Some(syn::FnArg::Typed(pat_type)) = method.sig.inputs.iter().nth(1) {
+                        cast_msg_ty = Some((*pat_type.ty).clone());
                     }
                 }
                 "handle_info" => {

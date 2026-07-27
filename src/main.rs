@@ -566,12 +566,11 @@ fn cmd_new(args: &[String]) -> Result<()> {
     std::fs::create_dir_all(root.join("components"))?;
 
     // Cargo.toml
-    let cargo_toml = format!(
-        r#"[workspace]
+    let cargo_toml = r#"[workspace]
 members = ["components/*"]
 resolver = "2"
 "#
-    );
+    .to_string();
     std::fs::write(root.join("Cargo.toml"), cargo_toml)?;
 
     // wit/world.wit

@@ -508,6 +508,10 @@ fn parse_wave_args(
 }
 
 /// Start a process: instantiate component, find `start` export, call it.
+// Every argument is a distinct piece of runtime context that must reach the
+// host state. Bundling them into a params struct would be the cleaner fix;
+// left as-is for now to keep this change limited to enabling the clippy gate.
+#[allow(clippy::too_many_arguments)]
 pub async fn start_process(
     engine: &Engine,
     component: &wasmtime::component::Component,
@@ -616,7 +620,7 @@ fn find_start_export(
                 for (func_name, _) in inst_type.exports(engine) {
                     if func_name == "start" {
                         // Access via the instance export path: instance[name]["start"]
-                        if let Some(func) = instance.get_func(&mut *store, &format!("{name}/start"))
+                        if let Some(func) = instance.get_func(&mut *store, format!("{name}/start"))
                         {
                             return Ok(func);
                         }
@@ -624,10 +628,10 @@ fn find_start_export(
                 }
             }
             ComponentItem::CoreFunc(_) => {
-                if name == "start" {
-                    if let Some(func) = instance.get_func(&mut *store, "start") {
-                        return Ok(func);
-                    }
+                if name == "start"
+                    && let Some(func) = instance.get_func(&mut *store, "start")
+                {
+                    return Ok(func);
                 }
             }
             _ => {}

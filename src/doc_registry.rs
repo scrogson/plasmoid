@@ -167,19 +167,19 @@ impl DocRegistry {
                     addr: registry_entry.addr,
                 };
 
-                if key_str.starts_with("name/") {
-                    if let Some(name) = &registry_entry.name {
-                        tracing::info!(
-                            pid = %remote.pid,
-                            name = %name,
-                            node = %remote.node.fmt_short(),
-                            "Remote particle registered (via doc)"
-                        );
-                        self.remote_names
-                            .write()
-                            .await
-                            .insert(name.clone(), remote.clone());
-                    }
+                if key_str.starts_with("name/")
+                    && let Some(name) = &registry_entry.name
+                {
+                    tracing::info!(
+                        pid = %remote.pid,
+                        name = %name,
+                        node = %remote.node.fmt_short(),
+                        "Remote particle registered (via doc)"
+                    );
+                    self.remote_names
+                        .write()
+                        .await
+                        .insert(name.clone(), remote.clone());
                 }
 
                 if key_str.starts_with("pid/") {
@@ -192,27 +192,27 @@ impl DocRegistry {
             LiveEvent::ContentReady { hash } => {
                 // Content became available — try to parse any deferred entries.
                 // This handles the case where InsertRemote fires before content is downloaded.
-                if let Ok(content) = self.blobs.get_bytes(hash).await {
-                    if let Ok(entry) = postcard::from_bytes::<RegistryEntry>(&content) {
-                        if entry.node == self.endpoint.id() {
-                            return Ok(());
-                        }
+                if let Ok(content) = self.blobs.get_bytes(hash).await
+                    && let Ok(entry) = postcard::from_bytes::<RegistryEntry>(&content)
+                {
+                    if entry.node == self.endpoint.id() {
+                        return Ok(());
+                    }
 
-                        let remote = RemoteParticle {
-                            pid: entry.pid.clone(),
-                            component: entry.component,
-                            name: entry.name.clone(),
-                            node: entry.node,
-                            addr: entry.addr,
-                        };
+                    let remote = RemoteParticle {
+                        pid: entry.pid.clone(),
+                        component: entry.component,
+                        name: entry.name.clone(),
+                        node: entry.node,
+                        addr: entry.addr,
+                    };
 
-                        self.remote_pids
-                            .write()
-                            .await
-                            .insert(entry.pid, remote.clone());
-                        if let Some(name) = entry.name {
-                            self.remote_names.write().await.insert(name, remote);
-                        }
+                    self.remote_pids
+                        .write()
+                        .await
+                        .insert(entry.pid, remote.clone());
+                    if let Some(name) = entry.name {
+                        self.remote_names.write().await.insert(name, remote);
                     }
                 }
             }
@@ -266,11 +266,11 @@ impl DocRegistry {
 
         // Also remove by name if we have it cached locally
         // (The local registry handles name cleanup, but we clean the doc too)
-        if let Some(entry) = self.local.get_by_pid(pid).await {
-            if let Some(name) = &entry.name {
-                let name_key = format!("name/{}", name);
-                self.doc.del(self.author, name_key).await?;
-            }
+        if let Some(entry) = self.local.get_by_pid(pid).await
+            && let Some(name) = &entry.name
+        {
+            let name_key = format!("name/{}", name);
+            self.doc.del(self.author, name_key).await?;
         }
 
         Ok(())
@@ -291,10 +291,8 @@ impl DocRegistry {
 
     /// Resolve a PID: check if local, then remote cache.
     pub async fn resolve_pid(&self, pid: &Pid) -> Option<ResolvedParticle> {
-        if pid.is_local_to(&self.endpoint.id()) {
-            if self.local.get_by_pid(pid).await.is_some() {
-                return Some(ResolvedParticle::Local(pid.clone()));
-            }
+        if pid.is_local_to(&self.endpoint.id()) && self.local.get_by_pid(pid).await.is_some() {
+            return Some(ResolvedParticle::Local(pid.clone()));
         }
 
         if let Some(remote) = self.remote_pids.read().await.get(pid) {

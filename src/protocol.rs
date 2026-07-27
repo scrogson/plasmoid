@@ -193,13 +193,12 @@ async fn handle_spawn(
     }
 
     // Announce to doc registry for cross-node discovery
-    if let Some(ref doc_reg) = doc_registry {
-        if let Err(e) = doc_reg
+    if let Some(ref doc_reg) = doc_registry
+        && let Err(e) = doc_reg
             .announce_spawn(&pid, &request.component, request.name.as_deref())
             .await
-        {
-            tracing::debug!(error = %e, "Failed to announce spawn (no peers yet?)");
-        }
+    {
+        tracing::debug!(error = %e, "Failed to announce spawn (no peers yet?)");
     }
 
     CommandResponse::Spawn(SpawnResponse {

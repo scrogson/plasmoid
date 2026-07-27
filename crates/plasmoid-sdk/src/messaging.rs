@@ -1,3 +1,11 @@
+// `crate::bindings::...` below is deliberate and must NOT become `$crate::`.
+// These macros expand in the *component* crate, where `#[plasmoid_sdk::main]`
+// or `#[gen_server]` has generated a `bindings` module. `plasmoid-sdk` has no
+// `bindings` module of its own, so `$crate::bindings` would fail to resolve and
+// break every component. Note the macros use `$crate::messaging::encode` for
+// the SDK's own items — the two forms are distinguished on purpose.
+#![allow(clippy::crate_in_macro_def)]
+
 use serde::{de::DeserializeOwned, Serialize};
 
 pub fn encode<T: Serialize>(val: &T) -> Vec<u8> {

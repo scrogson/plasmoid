@@ -355,12 +355,12 @@ impl ParticleRegistry {
         };
 
         // Remove from target's monitored_by list
-        if let Some(target_pid) = target {
-            if let Some(state) = states.get_mut(&target_pid) {
-                state
-                    .monitored_by
-                    .retain(|(w, r)| !(w == watcher && *r == monitor_ref));
-            }
+        if let Some(target_pid) = target
+            && let Some(state) = states.get_mut(&target_pid)
+        {
+            state
+                .monitored_by
+                .retain(|(w, r)| !(w == watcher && *r == monitor_ref));
         }
     }
 
@@ -433,10 +433,10 @@ impl ParticleRegistry {
         // Remove particle entry
         {
             let entry = self.particles.write().await.remove(pid);
-            if let Some(ref entry) = entry {
-                if let Some(ref name) = entry.name {
-                    self.names.write().await.remove(name);
-                }
+            if let Some(ref entry) = entry
+                && let Some(ref name) = entry.name
+            {
+                self.names.write().await.remove(name);
             }
         }
 
