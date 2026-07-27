@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: build & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - uses: Swatinem/rust-cache@v2
+
+      # Installed from source on purpose. cargo-component is NOT in
+      # taiki-e/install-action's manifest list, and its GitHub releases carry no
+      # binary assets, so cargo-binstall cannot fetch it either. rust-cache
+      # caches ~/.cargo/bin, so this is only paid on a cold cache.
+      - name: Install cargo-component
+        run: cargo install cargo-component --locked
+
+      # The WASM components are excluded from the workspace (Cargo.toml:3), so
+      # `cargo build --workspace` does not cover them and `-p echo` does not
+      # resolve from the repo root — they build from inside their own directories.
+      #
+      # This step is not optional. The e2e tests look for echo.wasm on disk and
+      # SILENTLY SKIP when it is missing, still reporting `test result: ok`.
+      # Without this, CI would go green having never exercised the runtime.
+      - name: Build WASM components
+        run: |
+          (cd components/echo && cargo component build --release)
+          (cd components/ring && cargo component build --release)
+
+      - name: Assert the e2e artifact exists
+        run: test -f components/echo/target/wasm32-wasip1/release/echo.wasm
+
+      - run: cargo build --workspace --all-targets
+
+      # `shell: bash` gives `-o pipefail`, which the default shell lacks —
+      # without it a failing test suite piped into tee would report success.
+      - name: Test
+        shell: bash
+        run: cargo test --workspace -- --nocapture | tee test-output.txt
+
+      # Backstop for the silent-skip behaviour above: if the artifact path ever
+      # moves, fail loudly rather than reporting a hollow green.
+      - name: Fail if any test skipped for a missing component
+        shell: bash
+        run: |
+          if grep -q "not found at" test-output.txt; then
+            echo "::error::e2e tests skipped because a WASM component was missing"
+            exit 1
+          fi
+
+      # Guards the README quick start, which was broken until it was verified by
+      # running it. Note `plasmoid new` writes a workspace with
+      # members = ["components/*"], so unlike this repo the component IS a
+      # workspace member and `-p <name>` resolves from the app root.
+      - name: Scaffold smoke test (README quick start)
+        shell: bash
+        run: |
+          ./target/debug/plasmoid new my-app
+          cd my-app
+          ../target/debug/plasmoid component new greeter
+          cargo component build -p greeter --release
+          test -f target/wasm32-wasip1/release/greeter.wasm
