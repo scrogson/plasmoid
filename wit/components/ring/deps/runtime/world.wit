@@ -1,6 +1,6 @@
-package plasmoid:runtime@0.4.0;
+package plasmoid:runtime@0.5.0;
 
-interface process {
+interface host {
     resource pid {
         to-string: func() -> string;
     }
@@ -72,7 +72,7 @@ interface process {
     }
 
     enum send-error {
-        no-process,
+        no-particle,
         mailbox-full,
     }
 
@@ -82,10 +82,10 @@ interface process {
     }
 
     enum link-error {
-        no-process,
+        no-particle,
     }
 }
 
 world particle {
-    import process;
+    import host;
 }

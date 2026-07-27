@@ -20,7 +20,7 @@ pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
 macro_rules! send {
     ($target:expr, $msg:expr) => {{
         let encoded = $crate::messaging::encode($msg);
-        crate::bindings::plasmoid::runtime::process::send($target, &encoded)
+        crate::bindings::plasmoid::runtime::host::send($target, &encoded)
     }};
 }
 
@@ -28,8 +28,8 @@ macro_rules! send {
 macro_rules! recv {
     ($msg_type:ty, $timeout:expr) => {{
         loop {
-            match crate::bindings::plasmoid::runtime::process::recv($timeout) {
-                Some(crate::bindings::plasmoid::runtime::process::Message::Data(data)) => {
+            match crate::bindings::plasmoid::runtime::host::recv($timeout) {
+                Some(crate::bindings::plasmoid::runtime::host::Message::Data(data)) => {
                     match $crate::messaging::decode::<$msg_type>(&data) {
                         Ok(msg) => break Some(msg),
                         Err(_) => continue,

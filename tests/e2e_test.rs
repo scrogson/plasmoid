@@ -59,7 +59,7 @@ async fn test_echo_lifecycle() {
 
     // Verify the particle is alive
     assert!(
-        runtime.registry().process_exists(&pid).await,
+        runtime.registry().particle_exists(&pid).await,
         "echo particle should be running after spawn"
     );
 
@@ -81,7 +81,7 @@ async fn test_echo_lifecycle() {
 
     // Particle should still be alive (short messages are logged and ignored)
     assert!(
-        runtime.registry().process_exists(&pid).await,
+        runtime.registry().particle_exists(&pid).await,
         "echo particle should survive a short message"
     );
 
@@ -92,12 +92,12 @@ async fn test_echo_lifecycle() {
         .await
         .unwrap();
 
-    // Wait for the process to exit
+    // Wait for the particle to exit
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Verify the particle has exited
     assert!(
-        !runtime.registry().process_exists(&pid).await,
+        !runtime.registry().particle_exists(&pid).await,
         "echo particle should have exited after stop"
     );
 
@@ -160,9 +160,9 @@ async fn test_echo_reply() {
     // Give time for echo to process and send reply
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Both processes should still be alive
-    assert!(runtime.registry().process_exists(&echo_pid).await);
-    assert!(runtime.registry().process_exists(&sender_pid).await);
+    // Both particles should still be alive
+    assert!(runtime.registry().particle_exists(&echo_pid).await);
+    assert!(runtime.registry().particle_exists(&sender_pid).await);
 
     // Clean up
     runtime

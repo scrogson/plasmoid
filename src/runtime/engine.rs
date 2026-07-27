@@ -3,7 +3,7 @@ use crate::pid::{Pid, PidGenerator};
 use crate::policy::PolicySet;
 use crate::protocol::PlasmoidProtocol;
 use crate::registry::ParticleRegistry;
-use crate::runtime::start_process;
+use crate::runtime::start_particle;
 use anyhow::Result;
 use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
@@ -243,8 +243,8 @@ impl Runtime {
             .spawn(component, name, Some(caps.clone()))
             .await?;
 
-        // Start the process (calls component's start function)
-        start_process(
+        // Start the particle (calls component's start function)
+        start_particle(
             &self.engine,
             &comp,
             &caps,

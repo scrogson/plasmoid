@@ -21,8 +21,8 @@ use wasmtime::component::{Resource, Val, types::ComponentItem};
 // Generate typed bindings from the WIT world "particle" (imports only).
 //
 // The particle world has no exports, so bindgen generates:
-// - `plasmoid::runtime::process::Host` trait for import functions
-// - `plasmoid::runtime::process::HostPid` trait for pid resource methods
+// - `plasmoid::runtime::host::Host` trait for import functions
+// - `plasmoid::runtime::host::HostPid` trait for pid resource methods
 // - `Particle::add_to_linker` to wire up imports
 wasmtime::component::bindgen!({
     path: "wit",
@@ -31,11 +31,11 @@ wasmtime::component::bindgen!({
         default: async | trappable,
     },
     with: {
-        "plasmoid:runtime/process.pid": Pid,
+        "plasmoid:runtime/host.pid": Pid,
     },
 });
 
-impl plasmoid::runtime::process::HostPid for HostState {
+impl plasmoid::runtime::host::HostPid for HostState {
     async fn to_string(&mut self, self_: Resource<Pid>) -> wasmtime::Result<String> {
         let pid = self.resource_table().get(&self_)?;
         Ok(pid.to_string())
@@ -47,7 +47,7 @@ impl plasmoid::runtime::process::HostPid for HostState {
     }
 }
 
-impl plasmoid::runtime::process::Host for HostState {
+impl plasmoid::runtime::host::Host for HostState {
     async fn self_pid(&mut self) -> wasmtime::Result<Resource<Pid>> {
         let pid = self.pid().clone();
         let resource = self.resource_table_mut().push(pid)?;
@@ -67,14 +67,14 @@ impl plasmoid::runtime::process::Host for HostState {
         component: String,
         name: Option<String>,
         init_args: String,
-    ) -> wasmtime::Result<Result<Resource<Pid>, plasmoid::runtime::process::SpawnError>> {
+    ) -> wasmtime::Result<Result<Resource<Pid>, plasmoid::runtime::host::SpawnError>> {
         let registry = match self.registry() {
             Some(r) => r.clone(),
-            None => return Ok(Err(plasmoid::runtime::process::SpawnError::InitFailed)),
+            None => return Ok(Err(plasmoid::runtime::host::SpawnError::InitFailed)),
         };
         let engine = match self.engine() {
             Some(e) => e.clone(),
-            None => return Ok(Err(plasmoid::runtime::process::SpawnError::InitFailed)),
+            None => return Ok(Err(plasmoid::runtime::host::SpawnError::InitFailed)),
         };
         let endpoint = self.endpoint().cloned();
         let doc_registry = self.doc_registry().cloned();
@@ -83,25 +83,23 @@ impl plasmoid::runtime::process::Host for HostState {
         let (comp, caps) = match registry.get_component(&component).await {
             Some((c, default_caps)) => (c, default_caps),
             None => {
-                return Ok(Err(
-                    plasmoid::runtime::process::SpawnError::ComponentNotFound,
-                ));
+                return Ok(Err(plasmoid::runtime::host::SpawnError::ComponentNotFound));
             }
         };
 
-        // Spawn the process in the registry
+        // Spawn the particle in the registry
         let (pid, mailbox) = match registry
             .spawn(&component, name.as_deref(), Some(caps.clone()))
             .await
         {
             Ok(result) => result,
-            Err(_) => return Ok(Err(plasmoid::runtime::process::SpawnError::InitFailed)),
+            Err(_) => return Ok(Err(plasmoid::runtime::host::SpawnError::InitFailed)),
         };
 
-        // Start the process
+        // Start the particle
         let pid_clone = pid.clone();
         let registry_clone = registry.clone();
-        if let Err(e) = start_process(
+        if let Err(e) = start_particle(
             &engine,
             &comp,
             &caps,
@@ -115,8 +113,8 @@ impl plasmoid::runtime::process::Host for HostState {
         )
         .await
         {
-            tracing::error!(error = %e, "Failed to start spawned process");
-            return Ok(Err(plasmoid::runtime::process::SpawnError::InitFailed));
+            tracing::error!(error = %e, "Failed to start spawned particle");
+            return Ok(Err(plasmoid::runtime::host::SpawnError::InitFailed));
         }
 
         let resource = self
@@ -126,15 +124,12 @@ impl plasmoid::runtime::process::Host for HostState {
         Ok(Ok(resource))
     }
 
-    async fn exit(
-        &mut self,
-        reason: plasmoid::runtime::process::ExitReason,
-    ) -> wasmtime::Result<()> {
+    async fn exit(&mut self, reason: plasmoid::runtime::host::ExitReason) -> wasmtime::Result<()> {
         let exit_reason = wit_exit_reason_to_internal(reason);
         let pid = self.pid().clone();
         if let Some(registry) = self.registry() {
             let registry = registry.clone();
-            registry.exit_process(&pid, exit_reason).await;
+            registry.exit_particle(&pid, exit_reason).await;
         }
         Ok(())
     }
@@ -143,20 +138,20 @@ impl plasmoid::runtime::process::Host for HostState {
         &mut self,
         target: Resource<Pid>,
         msg: Vec<u8>,
-    ) -> wasmtime::Result<Result<(), plasmoid::runtime::process::SendError>> {
+    ) -> wasmtime::Result<Result<(), plasmoid::runtime::host::SendError>> {
         let pid = match self.resource_table().get(&target) {
             Ok(p) => p.clone(),
-            Err(_) => return Ok(Err(plasmoid::runtime::process::SendError::NoProcess)),
+            Err(_) => return Ok(Err(plasmoid::runtime::host::SendError::NoParticle)),
         };
 
         let registry = match self.registry() {
             Some(r) => r.clone(),
-            None => return Ok(Err(plasmoid::runtime::process::SendError::NoProcess)),
+            None => return Ok(Err(plasmoid::runtime::host::SendError::NoParticle)),
         };
 
         let result = registry.send_to_pid(&pid, msg).await.map_err(|e| match e {
-            SendError::NoProcess => plasmoid::runtime::process::SendError::NoProcess,
-            SendError::MailboxFull => plasmoid::runtime::process::SendError::MailboxFull,
+            SendError::NoParticle => plasmoid::runtime::host::SendError::NoParticle,
+            SendError::MailboxFull => plasmoid::runtime::host::SendError::MailboxFull,
         });
         Ok(result)
     }
@@ -166,23 +161,23 @@ impl plasmoid::runtime::process::Host for HostState {
         target: Resource<Pid>,
         ref_id: u64,
         msg: Vec<u8>,
-    ) -> wasmtime::Result<Result<(), plasmoid::runtime::process::SendError>> {
+    ) -> wasmtime::Result<Result<(), plasmoid::runtime::host::SendError>> {
         let pid = match self.resource_table().get(&target) {
             Ok(p) => p.clone(),
-            Err(_) => return Ok(Err(plasmoid::runtime::process::SendError::NoProcess)),
+            Err(_) => return Ok(Err(plasmoid::runtime::host::SendError::NoParticle)),
         };
 
         let registry = match self.registry() {
             Some(r) => r.clone(),
-            None => return Ok(Err(plasmoid::runtime::process::SendError::NoProcess)),
+            None => return Ok(Err(plasmoid::runtime::host::SendError::NoParticle)),
         };
 
         let result = registry
             .send_tagged_to_pid(&pid, ref_id, msg)
             .await
             .map_err(|e| match e {
-                SendError::NoProcess => plasmoid::runtime::process::SendError::NoProcess,
-                SendError::MailboxFull => plasmoid::runtime::process::SendError::MailboxFull,
+                SendError::NoParticle => plasmoid::runtime::host::SendError::NoParticle,
+                SendError::MailboxFull => plasmoid::runtime::host::SendError::MailboxFull,
             });
         Ok(result)
     }
@@ -190,7 +185,7 @@ impl plasmoid::runtime::process::Host for HostState {
     async fn recv(
         &mut self,
         timeout_ms: Option<u64>,
-    ) -> wasmtime::Result<Option<plasmoid::runtime::process::Message>> {
+    ) -> wasmtime::Result<Option<plasmoid::runtime::host::Message>> {
         let mailbox = match self.mailbox() {
             Some(m) => m.clone(),
             None => return Ok(None),
@@ -212,7 +207,7 @@ impl plasmoid::runtime::process::Host for HostState {
         &mut self,
         ref_id: u64,
         timeout_ms: Option<u64>,
-    ) -> wasmtime::Result<Option<plasmoid::runtime::process::Message>> {
+    ) -> wasmtime::Result<Option<plasmoid::runtime::host::Message>> {
         let mailbox = match self.mailbox() {
             Some(m) => m.clone(),
             None => return Ok(None),
@@ -246,40 +241,36 @@ impl plasmoid::runtime::process::Host for HostState {
     async fn register(
         &mut self,
         name: String,
-    ) -> wasmtime::Result<Result<(), plasmoid::runtime::process::RegistryError>> {
+    ) -> wasmtime::Result<Result<(), plasmoid::runtime::host::RegistryError>> {
         let pid = self.pid().clone();
         let registry = match self.registry() {
             Some(r) => r.clone(),
             None => {
-                return Ok(Err(
-                    plasmoid::runtime::process::RegistryError::NotRegistered,
-                ));
+                return Ok(Err(plasmoid::runtime::host::RegistryError::NotRegistered));
             }
         };
         let result = registry
             .register_name(&pid, &name)
             .await
-            .map_err(|_| plasmoid::runtime::process::RegistryError::AlreadyRegistered);
+            .map_err(|_| plasmoid::runtime::host::RegistryError::AlreadyRegistered);
         Ok(result)
     }
 
     async fn unregister(
         &mut self,
         name: String,
-    ) -> wasmtime::Result<Result<(), plasmoid::runtime::process::RegistryError>> {
+    ) -> wasmtime::Result<Result<(), plasmoid::runtime::host::RegistryError>> {
         let registry = match self.registry() {
             Some(r) => r.clone(),
             None => {
-                return Ok(Err(
-                    plasmoid::runtime::process::RegistryError::NotRegistered,
-                ));
+                return Ok(Err(plasmoid::runtime::host::RegistryError::NotRegistered));
             }
         };
         let my_pid = self.pid().clone();
         let result = registry
             .unregister_name(&my_pid, &name)
             .await
-            .map_err(|_| plasmoid::runtime::process::RegistryError::NotRegistered);
+            .map_err(|_| plasmoid::runtime::host::RegistryError::NotRegistered);
         Ok(result)
     }
 
@@ -299,22 +290,22 @@ impl plasmoid::runtime::process::Host for HostState {
     async fn link(
         &mut self,
         target: Resource<Pid>,
-    ) -> wasmtime::Result<Result<(), plasmoid::runtime::process::LinkError>> {
+    ) -> wasmtime::Result<Result<(), plasmoid::runtime::host::LinkError>> {
         let target_pid = match self.resource_table().get(&target) {
             Ok(p) => p.clone(),
-            Err(_) => return Ok(Err(plasmoid::runtime::process::LinkError::NoProcess)),
+            Err(_) => return Ok(Err(plasmoid::runtime::host::LinkError::NoParticle)),
         };
         let my_pid = self.pid().clone();
 
         let registry = match self.registry() {
             Some(r) => r.clone(),
-            None => return Ok(Err(plasmoid::runtime::process::LinkError::NoProcess)),
+            None => return Ok(Err(plasmoid::runtime::host::LinkError::NoParticle)),
         };
 
         let result = registry
             .link(&my_pid, &target_pid)
             .await
-            .map_err(|_| plasmoid::runtime::process::LinkError::NoProcess);
+            .map_err(|_| plasmoid::runtime::host::LinkError::NoParticle);
         Ok(result)
     }
 
@@ -367,25 +358,25 @@ impl plasmoid::runtime::process::Host for HostState {
 
     async fn log(
         &mut self,
-        level: plasmoid::runtime::process::LogLevel,
+        level: plasmoid::runtime::host::LogLevel,
         message: String,
     ) -> wasmtime::Result<()> {
         let pid = self.pid();
         let name_str = self.name().unwrap_or("?");
         match level {
-            plasmoid::runtime::process::LogLevel::Trace => {
+            plasmoid::runtime::host::LogLevel::Trace => {
                 tracing::trace!(pid = %pid, name = %name_str, "{}", message)
             }
-            plasmoid::runtime::process::LogLevel::Debug => {
+            plasmoid::runtime::host::LogLevel::Debug => {
                 tracing::debug!(pid = %pid, name = %name_str, "{}", message)
             }
-            plasmoid::runtime::process::LogLevel::Info => {
+            plasmoid::runtime::host::LogLevel::Info => {
                 tracing::info!(pid = %pid, name = %name_str, "{}", message)
             }
-            plasmoid::runtime::process::LogLevel::Warn => {
+            plasmoid::runtime::host::LogLevel::Warn => {
                 tracing::warn!(pid = %pid, name = %name_str, "{}", message)
             }
-            plasmoid::runtime::process::LogLevel::Error => {
+            plasmoid::runtime::host::LogLevel::Error => {
                 tracing::error!(pid = %pid, name = %name_str, "{}", message)
             }
         }
@@ -394,22 +385,22 @@ impl plasmoid::runtime::process::Host for HostState {
 }
 
 /// Convert WIT exit-reason to internal ExitReason.
-fn wit_exit_reason_to_internal(reason: plasmoid::runtime::process::ExitReason) -> ExitReason {
+fn wit_exit_reason_to_internal(reason: plasmoid::runtime::host::ExitReason) -> ExitReason {
     match reason {
-        plasmoid::runtime::process::ExitReason::Normal => ExitReason::Normal,
-        plasmoid::runtime::process::ExitReason::Kill => ExitReason::Kill,
-        plasmoid::runtime::process::ExitReason::Shutdown(s) => ExitReason::Shutdown(s),
-        plasmoid::runtime::process::ExitReason::Exception(s) => ExitReason::Exception(s),
+        plasmoid::runtime::host::ExitReason::Normal => ExitReason::Normal,
+        plasmoid::runtime::host::ExitReason::Kill => ExitReason::Kill,
+        plasmoid::runtime::host::ExitReason::Shutdown(s) => ExitReason::Shutdown(s),
+        plasmoid::runtime::host::ExitReason::Exception(s) => ExitReason::Exception(s),
     }
 }
 
 /// Convert internal ExitReason to WIT exit-reason.
-fn internal_exit_reason_to_wit(reason: &ExitReason) -> plasmoid::runtime::process::ExitReason {
+fn internal_exit_reason_to_wit(reason: &ExitReason) -> plasmoid::runtime::host::ExitReason {
     match reason {
-        ExitReason::Normal => plasmoid::runtime::process::ExitReason::Normal,
-        ExitReason::Kill => plasmoid::runtime::process::ExitReason::Kill,
-        ExitReason::Shutdown(s) => plasmoid::runtime::process::ExitReason::Shutdown(s.clone()),
-        ExitReason::Exception(s) => plasmoid::runtime::process::ExitReason::Exception(s.clone()),
+        ExitReason::Normal => plasmoid::runtime::host::ExitReason::Normal,
+        ExitReason::Kill => plasmoid::runtime::host::ExitReason::Kill,
+        ExitReason::Shutdown(s) => plasmoid::runtime::host::ExitReason::Shutdown(s.clone()),
+        ExitReason::Exception(s) => plasmoid::runtime::host::ExitReason::Exception(s.clone()),
     }
 }
 
@@ -417,21 +408,19 @@ fn internal_exit_reason_to_wit(reason: &ExitReason) -> plasmoid::runtime::proces
 fn mailbox_message_to_wit(
     msg: MailboxMessage,
     resource_table: &mut wasmtime::component::ResourceTable,
-) -> Result<plasmoid::runtime::process::Message> {
+) -> Result<plasmoid::runtime::host::Message> {
     match msg {
-        MailboxMessage::Data(data) => Ok(plasmoid::runtime::process::Message::Data(data)),
-        MailboxMessage::Tagged { ref_id, payload } => {
-            Ok(plasmoid::runtime::process::Message::Tagged(
-                plasmoid::runtime::process::TaggedMessage {
-                    ref_: ref_id,
-                    payload,
-                },
-            ))
-        }
+        MailboxMessage::Data(data) => Ok(plasmoid::runtime::host::Message::Data(data)),
+        MailboxMessage::Tagged { ref_id, payload } => Ok(plasmoid::runtime::host::Message::Tagged(
+            plasmoid::runtime::host::TaggedMessage {
+                ref_: ref_id,
+                payload,
+            },
+        )),
         MailboxMessage::Exit { from, reason } => {
             let sender_resource = resource_table.push(from)?;
-            Ok(plasmoid::runtime::process::Message::Exit(
-                plasmoid::runtime::process::ExitSignal {
+            Ok(plasmoid::runtime::host::Message::Exit(
+                plasmoid::runtime::host::ExitSignal {
                     sender: sender_resource,
                     reason: internal_exit_reason_to_wit(&reason),
                 },
@@ -443,8 +432,8 @@ fn mailbox_message_to_wit(
             reason,
         } => {
             let sender_resource = resource_table.push(from)?;
-            Ok(plasmoid::runtime::process::Message::Down(
-                plasmoid::runtime::process::DownSignal {
+            Ok(plasmoid::runtime::host::Message::Down(
+                plasmoid::runtime::host::DownSignal {
                     sender: sender_resource,
                     ref_: ref_id,
                     reason: internal_exit_reason_to_wit(&reason),
@@ -507,12 +496,12 @@ fn parse_wave_args(
     Ok(vals)
 }
 
-/// Start a process: instantiate component, find `start` export, call it.
+/// Start a particle: instantiate component, find `start` export, call it.
 // Every argument is a distinct piece of runtime context that must reach the
 // host state. Bundling them into a params struct would be the cleaner fix;
 // left as-is for now to keep this change limited to enabling the clippy gate.
 #[allow(clippy::too_many_arguments)]
-pub async fn start_process(
+pub async fn start_particle(
     engine: &Engine,
     component: &wasmtime::component::Component,
     capabilities: &PolicySet,
@@ -539,7 +528,7 @@ pub async fn start_process(
     // Add WASI support
     wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
 
-    // Add the process interface imports (generated by bindgen!)
+    // Add the host interface imports (generated by bindgen!)
     Particle::add_to_linker::<HostState, wasmtime::component::HasSelf<HostState>>(
         &mut linker,
         |state: &mut HostState| state,
@@ -580,13 +569,13 @@ pub async fn start_process(
 
                 let exit_reason = interpret_start_result(&results);
                 registry_for_task
-                    .exit_process(&pid_for_task, exit_reason)
+                    .exit_particle(&pid_for_task, exit_reason)
                     .await;
             }
             Err(e) => {
                 tracing::error!(pid = %pid_for_task, error = %e, "start function trapped");
                 registry_for_task
-                    .exit_process(
+                    .exit_particle(
                         &pid_for_task,
                         ExitReason::Exception(format!("start trap: {}", e)),
                     )

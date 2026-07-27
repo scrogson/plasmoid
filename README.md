@@ -182,10 +182,10 @@ plasmoid send <target> <message>     Send a message to a particle
 
 ## WIT Interface
 
-Particles import a WIT interface named `process` (the interface keeps the OTP term; the instance it serves is a particle). Abridged — see [`wit/world.wit`](./wit/world.wit) for the full contract:
+Particles import the WIT interface `host` — the runtime API surface. Abridged; see [`wit/world.wit`](./wit/world.wit) for the full contract:
 
 ```wit
-interface process {
+interface host {
     resource pid { to-string: func() -> string; }
 
     // Identity

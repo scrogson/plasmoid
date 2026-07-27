@@ -2,7 +2,7 @@ use crate::pid::Pid;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// How to address the target process.
+/// How to address the target particle.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Target {
     /// Address by PID.
@@ -11,7 +11,7 @@ pub enum Target {
     Name(String),
 }
 
-/// A request to send a message to a process.
+/// A request to send a message to a particle.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SendRequest {
     pub target: Target,
@@ -24,7 +24,7 @@ pub struct SendResponse {
     pub result: Result<(), String>,
 }
 
-/// A request to spawn a process from a registered component.
+/// A request to spawn a particle from a registered component.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SpawnRequest {
     pub component: String,

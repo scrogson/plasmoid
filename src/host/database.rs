@@ -8,7 +8,7 @@ pub enum DatabaseError {
     LockPoisoned,
 }
 
-/// Simple in-memory key-value store for actor state.
+/// Simple in-memory key-value store for particle state.
 #[derive(Debug, Default)]
 pub struct Database {
     data: RwLock<HashMap<String, Vec<u8>>>,

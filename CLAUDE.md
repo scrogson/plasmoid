@@ -40,7 +40,7 @@ cargo test --workspace     # build the components first — see Gotchas
 
 ## Conventions
 
-- **Vocabulary is fixed.** A running WASM instance is a **particle** — never *actor*, never *process*. `process` survives only as the name of the WIT interface in `wit/world.wit`; renaming it is tracked in [#9](https://github.com/scrogson/plasmoid/issues/9). Full glossary in `CONTEXT.md`.
+- **Vocabulary is fixed.** A running WASM instance is a **particle** — never *actor*, never *process*. Neither word appears anywhere in the code any more. The WIT interface particles import is `host`; a compiled component is a `LoadedComponent`. Full glossary in `CONTEXT.md`.
 - **`wit/world.wit` is the contract.** Both host (`wasmtime::component::bindgen!`) and guest (`wit-bindgen`) derive from it. Changing it is a breaking change for every component and needs a package version bump.
 - **Verify before documenting.** Grep for the symbol, run the command. This repo accumulated ~1100 lines of documentation describing a system that had been replaced underneath it; the cleanup is tracked in [#1](https://github.com/scrogson/plasmoid/issues/1).
 
@@ -51,8 +51,9 @@ cargo test --workspace     # build the components first — see Gotchas
 - **iroh rejects self-connection** — `ConnectWithOptsError::SelfConnect`. A test that connects needs two endpoints, not one.
 - **Don't swap the `cargo install cargo-component` step in CI for an install action.** cargo-component isn't in `taiki-e/install-action`'s manifests and publishes no release binaries, so `cargo-binstall` can't fetch it either.
 - **`plasmoid component new` scaffolds raw `wit-bindgen`**, not the SDK — no `plasmoid-sdk` dependency and no `#[main]`. A freshly scaffolded component looks nothing like the examples in `README.md`.
-- **`mise run ring:run` is broken.** It invokes `plasmoid call`, which was replaced by `plasmoid send` and now exits with an error. `call` and `run` survive only as deprecation stubs.
-- **`spawn` is not in the SDK prelude.** It resolves inside `#[plasmoid_sdk::main]` because the macro emits `use crate::bindings::plasmoid::runtime::process::*`.
+- **`plasmoid call` and `plasmoid run` are deprecation stubs** that exit with an error, pointing at `send` and `start`. Don't reintroduce them into scripts.
+- **The ring benchmark runs entirely from its init args at spawn time** — it has no message-driven entry point, so you trigger a run by spawning an orchestrator (`mise run ring:bench`), not by messaging a long-lived particle.
+- **`spawn` is not in the SDK prelude.** It resolves inside `#[plasmoid_sdk::main]` because the macro emits `use crate::bindings::plasmoid::runtime::host::*`.
 
 ## Agent skills
 

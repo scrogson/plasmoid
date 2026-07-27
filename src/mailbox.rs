@@ -26,7 +26,7 @@ pub enum MailboxMessage {
 
 #[derive(Debug)]
 pub enum SendError {
-    NoProcess,
+    NoParticle,
     MailboxFull,
 }
 
@@ -69,7 +69,7 @@ impl Mailbox {
     pub async fn push_data(&self, msg: Vec<u8>) -> Result<(), SendError> {
         let mut inner = self.inner.lock().await;
         if inner.closed {
-            return Err(SendError::NoProcess);
+            return Err(SendError::NoParticle);
         }
         if inner.data_count >= inner.capacity {
             return Err(SendError::MailboxFull);
@@ -85,7 +85,7 @@ impl Mailbox {
     pub async fn push_tagged(&self, ref_id: u64, payload: Vec<u8>) -> Result<(), SendError> {
         let mut inner = self.inner.lock().await;
         if inner.closed {
-            return Err(SendError::NoProcess);
+            return Err(SendError::NoParticle);
         }
         if inner.data_count >= inner.capacity {
             return Err(SendError::MailboxFull);

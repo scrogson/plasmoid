@@ -48,4 +48,4 @@ _Avoid_: Catch, handle errors, intercept
 
 **Actor** — deliberately not used. Plasmoid implements the concurrency model the literature calls the actor model, but names its unit a *particle*, the way Erlang names its unit a *process*. Never a synonym for particle.
 
-**Process** — deliberately not used in prose. It survives only as the name of the WIT interface a particle imports (`interface process` in `wit/world.wit`) and in Rust identifiers, both of which are pending a rename. Never a synonym for particle.
+**Process** — deliberately not used, and no longer present anywhere in the codebase. It was once the name of the WIT interface and of numerous Rust identifiers; both were renamed. The interface a particle imports is now `host`, since it is the runtime's API surface rather than a particle itself. The word survives only as an ordinary English verb ("process the events"). Never a synonym for particle.

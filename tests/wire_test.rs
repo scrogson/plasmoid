@@ -30,7 +30,7 @@ fn test_roundtrip_send_response_ok() {
 #[test]
 fn test_roundtrip_send_response_err() {
     let resp = SendResponse {
-        result: Err("no process".to_string()),
+        result: Err("no particle".to_string()),
     };
 
     let bytes = serialize(&resp).unwrap();

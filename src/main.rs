@@ -71,7 +71,7 @@ async fn main() -> Result<()> {
             bail!(
                 "'plasmoid run' has been replaced by 'plasmoid start'.\n\
                  Use 'plasmoid start' to boot a node and load components.\n\
-                 Use 'plasmoid spawn' to spawn processes on a running node.\n\n{}",
+                 Use 'plasmoid spawn' to spawn particles on a running node.\n\n{}",
                 USAGE
             );
         }
@@ -397,9 +397,9 @@ async fn cmd_send(args: &[String]) -> Result<()> {
 // Scaffolding commands
 // ---------------------------------------------------------------------------
 
-const RUNTIME_WIT: &str = r#"package plasmoid:runtime@0.4.0;
+const RUNTIME_WIT: &str = r#"package plasmoid:runtime@0.5.0;
 
-interface process {
+interface host {
     resource pid {
         to-string: func() -> string;
     }
@@ -471,7 +471,7 @@ interface process {
     }
 
     enum send-error {
-        no-process,
+        no-particle,
         mailbox-full,
     }
 
@@ -481,12 +481,12 @@ interface process {
     }
 
     enum link-error {
-        no-process,
+        no-particle,
     }
 }
 
 world particle {
-    import process;
+    import host;
 }
 "#;
 
@@ -669,23 +669,23 @@ world = "{name_underscored}"
         r#"#[allow(warnings)]
 mod bindings;
 
-use bindings::plasmoid::runtime::process;
+use bindings::plasmoid::runtime::host;
 
 struct {pascal_name};
 
 impl bindings::Guest for {pascal_name} {{
     fn start() -> Result<(), String> {{
-        process::log(process::LogLevel::Info, "{name_underscored} started");
+        host::log(host::LogLevel::Info, "{name_underscored} started");
         loop {{
-            match process::recv(None) {{
-                Some(process::Message::Data(data)) => {{
+            match host::recv(None) {{
+                Some(host::Message::Data(data)) => {{
                     if data == b"stop" {{
                         return Ok(());
                     }}
-                    process::log(process::LogLevel::Info, &format!("{name_underscored} received {{}} bytes", data.len()));
+                    host::log(host::LogLevel::Info, &format!("{name_underscored} received {{}} bytes", data.len()));
                 }}
-                Some(process::Message::Exit(_)) | Some(process::Message::Down(_)) => {{}}
-                Some(process::Message::Tagged(_)) => {{}}
+                Some(host::Message::Exit(_)) | Some(host::Message::Down(_)) => {{}}
+                Some(host::Message::Tagged(_)) => {{}}
                 None => return Ok(()),
             }}
         }}
@@ -702,7 +702,7 @@ bindings::export!({pascal_name} with_types_in bindings);
         r#"package {namespace}:{name}@0.1.0;
 
 world {name_underscored} {{
-    include plasmoid:runtime/particle@0.4.0;
+    include plasmoid:runtime/particle@0.5.0;
     export start: func() -> result<_, string>;
 }}
 "#

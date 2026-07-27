@@ -1,7 +1,7 @@
 use crate::host::HostState;
 use wasmtime::component::{ComponentType, Lift, Lower};
 
-/// Log level enum matching the WIT `plasmoid:runtime/process@0.3.0` log-level type.
+/// Log level enum matching the WIT `plasmoid:runtime/host@0.5.0` log-level type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ComponentType, Lift, Lower)]
 #[component(enum)]
 #[repr(u8)]

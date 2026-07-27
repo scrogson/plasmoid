@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// A globally unique process identifier.
+/// A globally unique particle identifier.
 ///
 /// Format: `<node_prefix.seq>` where `node_prefix` is the first 4 bytes
 /// (8 hex chars) of the EndpointId and `seq` is a monotonically increasing

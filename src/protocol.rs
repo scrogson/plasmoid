@@ -1,6 +1,6 @@
 use crate::doc_registry::DocRegistry;
 use crate::registry::ParticleRegistry;
-use crate::runtime::start_process;
+use crate::runtime::start_particle;
 use crate::wire::{
     Command, CommandResponse, SendRequest, SendResponse, SpawnRequest, SpawnResponse, SpawnResult,
     Target, deserialize, serialize,
@@ -123,7 +123,7 @@ async fn handle_send(request: SendRequest, registry: Arc<ParticleRegistry>) -> C
         }
     };
 
-    // Send the message to the process mailbox
+    // Send the message to the particle mailbox
     match registry.send_to_pid(&pid, request.msg).await {
         Ok(()) => CommandResponse::Send(SendResponse { result: Ok(()) }),
         Err(e) => CommandResponse::Send(SendResponse {
@@ -172,8 +172,8 @@ async fn handle_spawn(
         }
     };
 
-    // Start the process (calls component's start function)
-    if let Err(e) = start_process(
+    // Start the particle (calls component's start function)
+    if let Err(e) = start_particle(
         &engine,
         &component,
         &caps,
@@ -188,7 +188,7 @@ async fn handle_spawn(
     .await
     {
         return CommandResponse::Spawn(SpawnResponse {
-            result: Err(format!("failed to start process: {}", e)),
+            result: Err(format!("failed to start particle: {}", e)),
         });
     }
 

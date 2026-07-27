@@ -1,7 +1,7 @@
-mod actor;
+mod component;
 mod engine;
 pub mod invoke;
 
-pub use actor::WasmActor;
+pub use component::LoadedComponent;
 pub use engine::{PLASMOID_ALPN, Runtime};
-pub use invoke::start_process;
+pub use invoke::start_particle;

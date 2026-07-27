@@ -25,7 +25,7 @@ fn start(init: RingInit) -> Result<(), String> {
 }
 
 fn run_orchestrator(n: u32, m: u32) -> Result<(), String> {
-    info!("Ring: spawning {} processes, {} messages", n, m);
+    info!("Ring: spawning {} particles, {} messages", n, m);
 
     let self_str = self_pid().to_string();
     let mut workers = Vec::with_capacity(n as usize);
@@ -55,7 +55,7 @@ fn run_orchestrator(n: u32, m: u32) -> Result<(), String> {
             let e = t.elapsed();
             let total = n as u64 * m as u64;
             info!(
-                "Ring: {} processes, {} messages ({} hops) in {:.3}s ({:.0} msg/s)",
+                "Ring: {} particles, {} messages ({} hops) in {:.3}s ({:.0} msg/s)",
                 n,
                 m,
                 total,

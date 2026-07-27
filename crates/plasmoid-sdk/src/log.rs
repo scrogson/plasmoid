@@ -8,8 +8,8 @@
 #[macro_export]
 macro_rules! trace {
     ($($arg:tt)*) => {{
-        crate::bindings::plasmoid::runtime::process::log(
-            crate::bindings::plasmoid::runtime::process::LogLevel::Trace,
+        crate::bindings::plasmoid::runtime::host::log(
+            crate::bindings::plasmoid::runtime::host::LogLevel::Trace,
             &::std::format!($($arg)*),
         )
     }};
@@ -18,8 +18,8 @@ macro_rules! trace {
 #[macro_export]
 macro_rules! debug {
     ($($arg:tt)*) => {{
-        crate::bindings::plasmoid::runtime::process::log(
-            crate::bindings::plasmoid::runtime::process::LogLevel::Debug,
+        crate::bindings::plasmoid::runtime::host::log(
+            crate::bindings::plasmoid::runtime::host::LogLevel::Debug,
             &::std::format!($($arg)*),
         )
     }};
@@ -28,8 +28,8 @@ macro_rules! debug {
 #[macro_export]
 macro_rules! info {
     ($($arg:tt)*) => {{
-        crate::bindings::plasmoid::runtime::process::log(
-            crate::bindings::plasmoid::runtime::process::LogLevel::Info,
+        crate::bindings::plasmoid::runtime::host::log(
+            crate::bindings::plasmoid::runtime::host::LogLevel::Info,
             &::std::format!($($arg)*),
         )
     }};
@@ -38,8 +38,8 @@ macro_rules! info {
 #[macro_export]
 macro_rules! warn {
     ($($arg:tt)*) => {{
-        crate::bindings::plasmoid::runtime::process::log(
-            crate::bindings::plasmoid::runtime::process::LogLevel::Warn,
+        crate::bindings::plasmoid::runtime::host::log(
+            crate::bindings::plasmoid::runtime::host::LogLevel::Warn,
             &::std::format!($($arg)*),
         )
     }};
@@ -48,8 +48,8 @@ macro_rules! warn {
 #[macro_export]
 macro_rules! error {
     ($($arg:tt)*) => {{
-        crate::bindings::plasmoid::runtime::process::log(
-            crate::bindings::plasmoid::runtime::process::LogLevel::Error,
+        crate::bindings::plasmoid::runtime::host::log(
+            crate::bindings::plasmoid::runtime::host::LogLevel::Error,
             &::std::format!($($arg)*),
         )
     }};

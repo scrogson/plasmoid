@@ -80,7 +80,7 @@ fn expand_main_fn(func: ItemFn) -> TokenStream {
     let output = quote! {
         #[allow(warnings)]
         mod bindings;
-        use crate::bindings::plasmoid::runtime::process::*;
+        use crate::bindings::plasmoid::runtime::host::*;
 
         struct __PlasmoidComponent;
 
@@ -98,7 +98,7 @@ fn expand_main_struct(item_struct: ItemStruct) -> TokenStream {
     let output = quote! {
         #[allow(warnings)]
         mod bindings;
-        use crate::bindings::plasmoid::runtime::process::*;
+        use crate::bindings::plasmoid::runtime::host::*;
 
         #item_struct
     };
@@ -192,7 +192,7 @@ fn expand_gen_server(impl_block: syn::ItemImpl) -> Result<TokenStream, syn::Erro
     // Generate tagged message handler (handle_call)
     let tagged_handler = if has_handle_call {
         quote! {
-            Some(crate::bindings::plasmoid::runtime::process::Message::Tagged(tagged)) => {
+            Some(crate::bindings::plasmoid::runtime::host::Message::Tagged(tagged)) => {
                 let payload = &tagged.payload;
                 if payload.len() < 4 { continue; }
                 let pid_len = u32::from_le_bytes(payload[0..4].try_into().unwrap()) as usize;
@@ -208,8 +208,8 @@ fn expand_gen_server(impl_block: syn::ItemImpl) -> Result<TokenStream, syn::Erro
                 };
                 let response = state.handle_call(request);
                 let response_bytes = plasmoid_sdk::messaging::encode(&response);
-                if let Some(from) = crate::bindings::plasmoid::runtime::process::resolve(pid_str) {
-                    let _ = crate::bindings::plasmoid::runtime::process::send_ref(
+                if let Some(from) = crate::bindings::plasmoid::runtime::host::resolve(pid_str) {
+                    let _ = crate::bindings::plasmoid::runtime::host::send_ref(
                         &from,
                         tagged.ref_,
                         &response_bytes,
@@ -219,14 +219,14 @@ fn expand_gen_server(impl_block: syn::ItemImpl) -> Result<TokenStream, syn::Erro
         }
     } else {
         quote! {
-            Some(crate::bindings::plasmoid::runtime::process::Message::Tagged(_)) => {}
+            Some(crate::bindings::plasmoid::runtime::host::Message::Tagged(_)) => {}
         }
     };
 
     // Generate data message handler (handle_cast + handle_info)
     let data_handler = match (has_handle_cast, has_handle_info) {
         (true, true) => quote! {
-            Some(crate::bindings::plasmoid::runtime::process::Message::Data(data)) => {
+            Some(crate::bindings::plasmoid::runtime::host::Message::Data(data)) => {
                 if !data.is_empty() && data[0] == 0x01u8 {
                     let msg = match plasmoid_sdk::messaging::decode(&data[1..]) {
                         Ok(m) => m,
@@ -245,7 +245,7 @@ fn expand_gen_server(impl_block: syn::ItemImpl) -> Result<TokenStream, syn::Erro
             }
         },
         (true, false) => quote! {
-            Some(crate::bindings::plasmoid::runtime::process::Message::Data(data)) => {
+            Some(crate::bindings::plasmoid::runtime::host::Message::Data(data)) => {
                 if !data.is_empty() && data[0] == 0x01u8 {
                     let msg = match plasmoid_sdk::messaging::decode(&data[1..]) {
                         Ok(m) => m,
@@ -259,7 +259,7 @@ fn expand_gen_server(impl_block: syn::ItemImpl) -> Result<TokenStream, syn::Erro
             }
         },
         (false, true) => quote! {
-            Some(crate::bindings::plasmoid::runtime::process::Message::Data(data)) => {
+            Some(crate::bindings::plasmoid::runtime::host::Message::Data(data)) => {
                 match state.handle_info(data) {
                     plasmoid_sdk::CastResult::Stop => return Ok(()),
                     plasmoid_sdk::CastResult::Continue => {}
@@ -267,7 +267,7 @@ fn expand_gen_server(impl_block: syn::ItemImpl) -> Result<TokenStream, syn::Erro
             }
         },
         (false, false) => quote! {
-            Some(crate::bindings::plasmoid::runtime::process::Message::Data(_)) => {}
+            Some(crate::bindings::plasmoid::runtime::host::Message::Data(_)) => {}
         },
     };
 
@@ -280,7 +280,7 @@ fn expand_gen_server(impl_block: syn::ItemImpl) -> Result<TokenStream, syn::Erro
                 #init_state
 
                 loop {
-                    match crate::bindings::plasmoid::runtime::process::recv(None) {
+                    match crate::bindings::plasmoid::runtime::host::recv(None) {
                         #tagged_handler
                         #data_handler
                         Some(_) => {}
@@ -299,21 +299,21 @@ fn expand_gen_server(impl_block: syn::ItemImpl) -> Result<TokenStream, syn::Erro
         let reply_ty = call_reply_ty.as_ref().unwrap();
         quote! {
             pub fn call(
-                target: &crate::bindings::plasmoid::runtime::process::Pid,
+                target: &crate::bindings::plasmoid::runtime::host::Pid,
                 req: &#req_ty,
                 timeout_ms: Option<u64>,
             ) -> Result<#reply_ty, plasmoid_sdk::CallError> {
-                let ref_id = crate::bindings::plasmoid::runtime::process::make_ref();
-                let self_pid_str = crate::bindings::plasmoid::runtime::process::self_pid().to_string();
+                let ref_id = crate::bindings::plasmoid::runtime::host::make_ref();
+                let self_pid_str = crate::bindings::plasmoid::runtime::host::self_pid().to_string();
                 let req_bytes = plasmoid_sdk::messaging::encode(req);
                 let mut payload = Vec::new();
                 payload.extend((self_pid_str.len() as u32).to_le_bytes());
                 payload.extend(self_pid_str.as_bytes());
                 payload.extend(req_bytes);
-                crate::bindings::plasmoid::runtime::process::send_ref(target, ref_id, &payload)
+                crate::bindings::plasmoid::runtime::host::send_ref(target, ref_id, &payload)
                     .map_err(|_| plasmoid_sdk::CallError::SendFailed)?;
-                match crate::bindings::plasmoid::runtime::process::recv_ref(ref_id, timeout_ms) {
-                    Some(crate::bindings::plasmoid::runtime::process::Message::Tagged(tagged)) => {
+                match crate::bindings::plasmoid::runtime::host::recv_ref(ref_id, timeout_ms) {
+                    Some(crate::bindings::plasmoid::runtime::host::Message::Tagged(tagged)) => {
                         plasmoid_sdk::messaging::decode(&tagged.payload)
                             .map_err(|e| plasmoid_sdk::CallError::Decode(e))
                     }
@@ -329,12 +329,12 @@ fn expand_gen_server(impl_block: syn::ItemImpl) -> Result<TokenStream, syn::Erro
         let cast_ty = cast_msg_ty.as_ref().unwrap();
         quote! {
             pub fn cast(
-                target: &crate::bindings::plasmoid::runtime::process::Pid,
+                target: &crate::bindings::plasmoid::runtime::host::Pid,
                 msg: &#cast_ty,
-            ) -> Result<(), crate::bindings::plasmoid::runtime::process::SendError> {
+            ) -> Result<(), crate::bindings::plasmoid::runtime::host::SendError> {
                 let mut payload = vec![0x01u8];
                 payload.extend(plasmoid_sdk::messaging::encode(msg));
-                crate::bindings::plasmoid::runtime::process::send(target, &payload)
+                crate::bindings::plasmoid::runtime::host::send(target, &payload)
             }
         }
     } else {
@@ -355,7 +355,7 @@ fn expand_gen_server(impl_block: syn::ItemImpl) -> Result<TokenStream, syn::Erro
     let output = quote! {
         #[allow(warnings)]
         mod bindings;
-        use crate::bindings::plasmoid::runtime::process::*;
+        use crate::bindings::plasmoid::runtime::host::*;
 
         #impl_block
 

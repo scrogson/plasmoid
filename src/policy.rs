@@ -26,12 +26,12 @@ impl PolicySet {
     pub fn all() -> Self {
         Self::with_capabilities(&[
             "logging",
-            "actor:send",
-            "actor:spawn",
-            "actor:link",
-            "actor:monitor",
-            "process:register",
-            "process:lookup",
+            "particle:send",
+            "particle:spawn",
+            "particle:link",
+            "particle:monitor",
+            "particle:register",
+            "particle:lookup",
         ])
     }
 
