@@ -9,9 +9,19 @@ const DEFAULT_MAILBOX_CAPACITY: usize = 1024;
 #[derive(Debug, Clone)]
 pub enum MailboxMessage {
     Data(Vec<u8>),
-    Tagged { ref_id: u64, payload: Vec<u8> },
-    Exit { from: Pid, reason: ExitReason },
-    Down { from: Pid, ref_id: u64, reason: ExitReason },
+    Tagged {
+        ref_id: u64,
+        payload: Vec<u8>,
+    },
+    Exit {
+        from: Pid,
+        reason: ExitReason,
+    },
+    Down {
+        from: Pid,
+        ref_id: u64,
+        reason: ExitReason,
+    },
 }
 
 #[derive(Debug)]
@@ -81,7 +91,9 @@ impl Mailbox {
             return Err(SendError::MailboxFull);
         }
         inner.data_count += 1;
-        inner.queue.push_back(MailboxMessage::Tagged { ref_id, payload });
+        inner
+            .queue
+            .push_back(MailboxMessage::Tagged { ref_id, payload });
         drop(inner);
         self.notify.notify_one();
         Ok(())
@@ -91,9 +103,15 @@ impl Mailbox {
     pub async fn push_system(&self, msg: SystemMessage) {
         let mailbox_msg = match msg {
             SystemMessage::Exit { from, reason } => MailboxMessage::Exit { from, reason },
-            SystemMessage::Down { from, monitor_ref, reason } => {
-                MailboxMessage::Down { from, ref_id: monitor_ref, reason }
-            }
+            SystemMessage::Down {
+                from,
+                monitor_ref,
+                reason,
+            } => MailboxMessage::Down {
+                from,
+                ref_id: monitor_ref,
+                reason,
+            },
         };
         let mut inner = self.inner.lock().await;
         inner.queue.push_front(mailbox_msg);
@@ -120,7 +138,10 @@ impl Mailbox {
 
             match timeout {
                 Some(dur) => {
-                    if tokio::time::timeout(dur, self.notify.notified()).await.is_err() {
+                    if tokio::time::timeout(dur, self.notify.notified())
+                        .await
+                        .is_err()
+                    {
                         return None;
                     }
                 }
@@ -156,7 +177,10 @@ impl Mailbox {
 
             match timeout {
                 Some(dur) => {
-                    if tokio::time::timeout(dur, self.notify.notified()).await.is_err() {
+                    if tokio::time::timeout(dur, self.notify.notified())
+                        .await
+                        .is_err()
+                    {
                         return None;
                     }
                 }
@@ -184,14 +208,20 @@ mod tests {
 
     fn make_pid() -> Pid {
         let key = SecretKey::generate();
-        Pid { node: key.public(), seq: 1 }
+        Pid {
+            node: key.public(),
+            seq: 1,
+        }
     }
 
     #[tokio::test]
     async fn test_push_data_and_recv() {
         let mailbox = Mailbox::with_default_capacity();
         mailbox.push_data(b"hello".to_vec()).await.unwrap();
-        let msg = mailbox.recv(Some(Duration::from_millis(100))).await.unwrap();
+        let msg = mailbox
+            .recv(Some(Duration::from_millis(100)))
+            .await
+            .unwrap();
         match msg {
             MailboxMessage::Data(data) => assert_eq!(data, b"hello"),
             other => panic!("expected Data, got {:?}", other),
@@ -206,7 +236,10 @@ mod tests {
         mailbox.push_data(b"also unrelated".to_vec()).await.unwrap();
 
         // recv_ref should skip unrelated and find the tagged message
-        let msg = mailbox.recv_ref(42, Some(Duration::from_millis(100))).await.unwrap();
+        let msg = mailbox
+            .recv_ref(42, Some(Duration::from_millis(100)))
+            .await
+            .unwrap();
         match msg {
             MailboxMessage::Tagged { ref_id, payload } => {
                 assert_eq!(ref_id, 42);
@@ -216,7 +249,10 @@ mod tests {
         }
 
         // The other messages should still be there
-        let msg = mailbox.recv(Some(Duration::from_millis(100))).await.unwrap();
+        let msg = mailbox
+            .recv(Some(Duration::from_millis(100)))
+            .await
+            .unwrap();
         match msg {
             MailboxMessage::Data(data) => assert_eq!(data, b"unrelated"),
             other => panic!("expected Data, got {:?}", other),
@@ -229,20 +265,28 @@ mod tests {
         let pid = make_pid();
 
         mailbox.push_data(b"user msg".to_vec()).await.unwrap();
-        mailbox.push_system(SystemMessage::Exit {
-            from: pid.clone(),
-            reason: ExitReason::Normal,
-        }).await;
+        mailbox
+            .push_system(SystemMessage::Exit {
+                from: pid.clone(),
+                reason: ExitReason::Normal,
+            })
+            .await;
 
         // System message should come first (pushed to front)
-        let msg = mailbox.recv(Some(Duration::from_millis(100))).await.unwrap();
+        let msg = mailbox
+            .recv(Some(Duration::from_millis(100)))
+            .await
+            .unwrap();
         match msg {
             MailboxMessage::Exit { .. } => {}
             other => panic!("expected Exit, got {:?}", other),
         }
 
         // Then the data message
-        let msg = mailbox.recv(Some(Duration::from_millis(100))).await.unwrap();
+        let msg = mailbox
+            .recv(Some(Duration::from_millis(100)))
+            .await
+            .unwrap();
         match msg {
             MailboxMessage::Data(data) => assert_eq!(data, b"user msg"),
             other => panic!("expected Data, got {:?}", other),
@@ -262,10 +306,12 @@ mod tests {
         assert!(mailbox.push_data(b"3".to_vec()).await.is_err());
 
         // System message should succeed (unbounded)
-        mailbox.push_system(SystemMessage::Exit {
-            from: pid,
-            reason: ExitReason::Normal,
-        }).await;
+        mailbox
+            .push_system(SystemMessage::Exit {
+                from: pid,
+                reason: ExitReason::Normal,
+            })
+            .await;
     }
 
     #[tokio::test]
@@ -296,9 +342,7 @@ mod tests {
         let mailbox = Arc::new(Mailbox::with_default_capacity());
         let mailbox2 = mailbox.clone();
 
-        let handle = tokio::spawn(async move {
-            mailbox2.recv(None).await
-        });
+        let handle = tokio::spawn(async move { mailbox2.recv(None).await });
 
         // Give the task time to block on recv
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -315,14 +359,19 @@ mod tests {
 
         mailbox.push_tagged(1, b"wrong ref".to_vec()).await.unwrap();
         mailbox.push_data(b"data msg".to_vec()).await.unwrap();
-        mailbox.push_system(SystemMessage::Down {
-            from: pid.clone(),
-            monitor_ref: 42,
-            reason: ExitReason::Normal,
-        }).await;
+        mailbox
+            .push_system(SystemMessage::Down {
+                from: pid.clone(),
+                monitor_ref: 42,
+                reason: ExitReason::Normal,
+            })
+            .await;
 
         // recv_ref(42) should find the Down message
-        let msg = mailbox.recv_ref(42, Some(Duration::from_millis(100))).await.unwrap();
+        let msg = mailbox
+            .recv_ref(42, Some(Duration::from_millis(100)))
+            .await
+            .unwrap();
         match msg {
             MailboxMessage::Down { ref_id, .. } => assert_eq!(ref_id, 42),
             other => panic!("expected Down, got {:?}", other),
@@ -331,7 +380,10 @@ mod tests {
         // Other messages should still be in queue (system at front, then tagged, then data)
         // Actually after the Down was pushed_system (front), then tagged(1) was first data,
         // then data msg. After removing Down, the order is: tagged(1), data msg
-        let msg = mailbox.recv(Some(Duration::from_millis(100))).await.unwrap();
+        let msg = mailbox
+            .recv(Some(Duration::from_millis(100)))
+            .await
+            .unwrap();
         match msg {
             MailboxMessage::Tagged { ref_id, .. } => assert_eq!(ref_id, 1),
             other => panic!("expected Tagged(1), got {:?}", other),

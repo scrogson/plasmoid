@@ -11,12 +11,12 @@ use crate::message::ExitReason;
 pub use crate::pid::Pid;
 use crate::policy::PolicySet;
 use crate::registry::{ParticleRegistry, SendError};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use iroh::Endpoint;
 use std::sync::Arc;
 use std::time::Duration;
-use wasmtime::component::{Resource, Val, types::ComponentItem};
 use wasmtime::Engine;
+use wasmtime::component::{Resource, Val, types::ComponentItem};
 
 // Generate typed bindings from the WIT world "particle" (imports only).
 //
@@ -82,7 +82,11 @@ impl plasmoid::runtime::process::Host for HostState {
         // Look up the component template
         let (comp, caps) = match registry.get_component(&component).await {
             Some((c, default_caps)) => (c, default_caps),
-            None => return Ok(Err(plasmoid::runtime::process::SpawnError::ComponentNotFound)),
+            None => {
+                return Ok(Err(
+                    plasmoid::runtime::process::SpawnError::ComponentNotFound,
+                ));
+            }
         };
 
         // Spawn the process in the registry
@@ -122,7 +126,10 @@ impl plasmoid::runtime::process::Host for HostState {
         Ok(Ok(resource))
     }
 
-    async fn exit(&mut self, reason: plasmoid::runtime::process::ExitReason) -> wasmtime::Result<()> {
+    async fn exit(
+        &mut self,
+        reason: plasmoid::runtime::process::ExitReason,
+    ) -> wasmtime::Result<()> {
         let exit_reason = wit_exit_reason_to_internal(reason);
         let pid = self.pid().clone();
         if let Some(registry) = self.registry() {
@@ -170,10 +177,13 @@ impl plasmoid::runtime::process::Host for HostState {
             None => return Ok(Err(plasmoid::runtime::process::SendError::NoProcess)),
         };
 
-        let result = registry.send_tagged_to_pid(&pid, ref_id, msg).await.map_err(|e| match e {
-            SendError::NoProcess => plasmoid::runtime::process::SendError::NoProcess,
-            SendError::MailboxFull => plasmoid::runtime::process::SendError::MailboxFull,
-        });
+        let result = registry
+            .send_tagged_to_pid(&pid, ref_id, msg)
+            .await
+            .map_err(|e| match e {
+                SendError::NoProcess => plasmoid::runtime::process::SendError::NoProcess,
+                SendError::MailboxFull => plasmoid::runtime::process::SendError::MailboxFull,
+            });
         Ok(result)
     }
 
@@ -190,7 +200,10 @@ impl plasmoid::runtime::process::Host for HostState {
         let msg = mailbox.recv(timeout).await;
 
         match msg {
-            Some(mailbox_msg) => Ok(Some(mailbox_message_to_wit(mailbox_msg, self.resource_table_mut())?)),
+            Some(mailbox_msg) => Ok(Some(mailbox_message_to_wit(
+                mailbox_msg,
+                self.resource_table_mut(),
+            )?)),
             None => Ok(None),
         }
     }
@@ -209,7 +222,10 @@ impl plasmoid::runtime::process::Host for HostState {
         let msg = mailbox.recv_ref(ref_id, timeout).await;
 
         match msg {
-            Some(mailbox_msg) => Ok(Some(mailbox_message_to_wit(mailbox_msg, self.resource_table_mut())?)),
+            Some(mailbox_msg) => Ok(Some(mailbox_message_to_wit(
+                mailbox_msg,
+                self.resource_table_mut(),
+            )?)),
             None => Ok(None),
         }
     }
@@ -234,7 +250,11 @@ impl plasmoid::runtime::process::Host for HostState {
         let pid = self.pid().clone();
         let registry = match self.registry() {
             Some(r) => r.clone(),
-            None => return Ok(Err(plasmoid::runtime::process::RegistryError::NotRegistered)),
+            None => {
+                return Ok(Err(
+                    plasmoid::runtime::process::RegistryError::NotRegistered,
+                ));
+            }
         };
         let result = registry
             .register_name(&pid, &name)
@@ -249,7 +269,11 @@ impl plasmoid::runtime::process::Host for HostState {
     ) -> wasmtime::Result<Result<(), plasmoid::runtime::process::RegistryError>> {
         let registry = match self.registry() {
             Some(r) => r.clone(),
-            None => return Ok(Err(plasmoid::runtime::process::RegistryError::NotRegistered)),
+            None => {
+                return Ok(Err(
+                    plasmoid::runtime::process::RegistryError::NotRegistered,
+                ));
+            }
         };
         let my_pid = self.pid().clone();
         let result = registry
@@ -320,10 +344,7 @@ impl plasmoid::runtime::process::Host for HostState {
             None => return Ok(0),
         };
 
-        Ok(registry
-            .monitor(&my_pid, &target_pid)
-            .await
-            .unwrap_or(0))
+        Ok(registry.monitor(&my_pid, &target_pid).await.unwrap_or(0))
     }
 
     async fn demonitor(&mut self, monitor_ref: u64) -> wasmtime::Result<()> {
@@ -344,7 +365,11 @@ impl plasmoid::runtime::process::Host for HostState {
         Ok(())
     }
 
-    async fn log(&mut self, level: plasmoid::runtime::process::LogLevel, message: String) -> wasmtime::Result<()> {
+    async fn log(
+        &mut self,
+        level: plasmoid::runtime::process::LogLevel,
+        message: String,
+    ) -> wasmtime::Result<()> {
         let pid = self.pid();
         let name_str = self.name().unwrap_or("?");
         match level {
@@ -394,9 +419,7 @@ fn mailbox_message_to_wit(
     resource_table: &mut wasmtime::component::ResourceTable,
 ) -> Result<plasmoid::runtime::process::Message> {
     match msg {
-        MailboxMessage::Data(data) => {
-            Ok(plasmoid::runtime::process::Message::Data(data))
-        }
+        MailboxMessage::Data(data) => Ok(plasmoid::runtime::process::Message::Data(data)),
         MailboxMessage::Tagged { ref_id, payload } => {
             Ok(plasmoid::runtime::process::Message::Tagged(
                 plasmoid::runtime::process::TaggedMessage {
@@ -414,7 +437,11 @@ fn mailbox_message_to_wit(
                 },
             ))
         }
-        MailboxMessage::Down { from, ref_id, reason } => {
+        MailboxMessage::Down {
+            from,
+            ref_id,
+            reason,
+        } => {
             let sender_resource = resource_table.push(from)?;
             Ok(plasmoid::runtime::process::Message::Down(
                 plasmoid::runtime::process::DownSignal {
@@ -428,7 +455,10 @@ fn mailbox_message_to_wit(
 }
 
 /// Parse wasm-wave init args against a component's start function parameter types.
-fn parse_wave_args(init_args: &str, param_types: &[wasmtime::component::types::Type]) -> Result<Vec<Val>> {
+fn parse_wave_args(
+    init_args: &str,
+    param_types: &[wasmtime::component::types::Type],
+) -> Result<Vec<Val>> {
     if param_types.is_empty() {
         return Ok(vec![]);
     }
@@ -440,7 +470,9 @@ fn parse_wave_args(init_args: &str, param_types: &[wasmtime::component::types::T
     // For single-param functions, parse the whole string as that type
     if param_types.len() == 1 {
         if init_args.is_empty() {
-            return Err(anyhow!("start function expects 1 argument but none provided"));
+            return Err(anyhow!(
+                "start function expects 1 argument but none provided"
+            ));
         }
         // String params pass through raw — components handle their own parsing
         // (e.g., JSON via plasmoid_sdk::from_init_args)
@@ -504,11 +536,13 @@ pub async fn start_process(
     wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
 
     // Add the process interface imports (generated by bindgen!)
-    Particle::add_to_linker::<HostState, wasmtime::component::HasSelf<HostState>>(&mut linker, |state: &mut HostState| state)?;
+    Particle::add_to_linker::<HostState, wasmtime::component::HasSelf<HostState>>(
+        &mut linker,
+        |state: &mut HostState| state,
+    )?;
 
     // Instantiate the component
-    let instance =
-        linker.instantiate_async(&mut store, component).await?;
+    let instance = linker.instantiate_async(&mut store, component).await?;
 
     // Find the `start` export function
     // Components may nest exports in different ways, so we search for it
@@ -541,7 +575,9 @@ pub async fn start_process(
                 }
 
                 let exit_reason = interpret_start_result(&results);
-                registry_for_task.exit_process(&pid_for_task, exit_reason).await;
+                registry_for_task
+                    .exit_process(&pid_for_task, exit_reason)
+                    .await;
             }
             Err(e) => {
                 tracing::error!(pid = %pid_for_task, error = %e, "start function trapped");
@@ -580,7 +616,8 @@ fn find_start_export(
                 for (func_name, _) in inst_type.exports(engine) {
                     if func_name == "start" {
                         // Access via the instance export path: instance[name]["start"]
-                        if let Some(func) = instance.get_func(&mut *store, &format!("{name}/start")) {
+                        if let Some(func) = instance.get_func(&mut *store, &format!("{name}/start"))
+                        {
                             return Ok(func);
                         }
                     }
@@ -609,19 +646,17 @@ fn interpret_start_result(results: &[Val]) -> ExitReason {
     }
 
     match &results[0] {
-        Val::Result(result_val) => {
-            match result_val {
-                Ok(_) => ExitReason::Normal,
-                Err(Some(val)) => {
-                    let err_msg = match val.as_ref() {
-                        Val::String(s) => s.to_string(),
-                        other => format!("{:?}", other),
-                    };
-                    ExitReason::Exception(format!("start failed: {}", err_msg))
-                }
-                Err(None) => ExitReason::Exception("start failed (no error details)".to_string()),
+        Val::Result(result_val) => match result_val {
+            Ok(_) => ExitReason::Normal,
+            Err(Some(val)) => {
+                let err_msg = match val.as_ref() {
+                    Val::String(s) => s.to_string(),
+                    other => format!("{:?}", other),
+                };
+                ExitReason::Exception(format!("start failed: {}", err_msg))
             }
-        }
+            Err(None) => ExitReason::Exception("start failed (no error details)".to_string()),
+        },
         _ => ExitReason::Normal,
     }
 }

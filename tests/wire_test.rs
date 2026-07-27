@@ -1,8 +1,8 @@
-use plasmoid::wire::{
-    SendRequest, SendResponse, Command, CommandResponse, SpawnRequest, SpawnResponse, SpawnResult,
-    Target, serialize, deserialize,
-};
 use plasmoid::pid::Pid;
+use plasmoid::wire::{
+    Command, CommandResponse, SendRequest, SendResponse, SpawnRequest, SpawnResponse, SpawnResult,
+    Target, deserialize, serialize,
+};
 
 #[test]
 fn test_roundtrip_send_request() {
@@ -19,9 +19,7 @@ fn test_roundtrip_send_request() {
 
 #[test]
 fn test_roundtrip_send_response_ok() {
-    let resp = SendResponse {
-        result: Ok(()),
-    };
+    let resp = SendResponse { result: Ok(()) };
 
     let bytes = serialize(&resp).unwrap();
     let decoded: SendResponse = deserialize(&bytes).unwrap();
@@ -84,9 +82,7 @@ fn test_roundtrip_command_spawn_no_name() {
 
 #[test]
 fn test_roundtrip_command_response_send() {
-    let resp = CommandResponse::Send(SendResponse {
-        result: Ok(()),
-    });
+    let resp = CommandResponse::Send(SendResponse { result: Ok(()) });
 
     let bytes = serialize(&resp).unwrap();
     let decoded: CommandResponse = deserialize(&bytes).unwrap();
@@ -97,7 +93,10 @@ fn test_roundtrip_command_response_send() {
 #[test]
 fn test_roundtrip_command_response_spawn() {
     let node_key = iroh::SecretKey::generate();
-    let pid = Pid { node: node_key.public(), seq: 1 };
+    let pid = Pid {
+        node: node_key.public(),
+        seq: 1,
+    };
 
     let resp = CommandResponse::Spawn(SpawnResponse {
         result: Ok(SpawnResult {
@@ -116,7 +115,10 @@ fn test_roundtrip_command_response_spawn() {
 #[test]
 fn test_roundtrip_send_request_with_pid_target() {
     let node_key = iroh::SecretKey::generate();
-    let pid = Pid { node: node_key.public(), seq: 42 };
+    let pid = Pid {
+        node: node_key.public(),
+        seq: 42,
+    };
 
     let req = SendRequest {
         target: Target::Pid(pid),

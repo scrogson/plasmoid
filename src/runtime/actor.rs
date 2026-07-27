@@ -1,7 +1,7 @@
 use crate::policy::PolicySet;
 use anyhow::Result;
-use wasmtime::component::Component;
 use wasmtime::Engine;
+use wasmtime::component::Component;
 
 /// A deployed WASM component instance.
 pub struct WasmActor {

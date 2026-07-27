@@ -2,10 +2,10 @@ use crate::pid::Pid;
 use crate::registry::ParticleRegistry;
 use iroh::{Endpoint, EndpointAddr, EndpointId};
 use iroh_blobs::store::mem::MemStore;
+use iroh_docs::NamespaceSecret;
 use iroh_docs::engine::LiveEvent;
 use iroh_docs::protocol::Docs;
 use iroh_docs::sync::Capability;
-use iroh_docs::NamespaceSecret;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -105,10 +105,7 @@ impl DocRegistry {
     ///
     /// Must be called once during startup. Use `add_peers` to add
     /// bootstrap peers later.
-    pub async fn start(
-        self: &Arc<Self>,
-        peers: &[EndpointId],
-    ) -> anyhow::Result<()> {
+    pub async fn start(self: &Arc<Self>, peers: &[EndpointId]) -> anyhow::Result<()> {
         // Start sync (empty peers = accept incoming only)
         let peer_addrs: Vec<EndpointAddr> = peers.iter().map(|id| (*id).into()).collect();
         self.doc.start_sync(peer_addrs).await?;
@@ -178,12 +175,18 @@ impl DocRegistry {
                             node = %remote.node.fmt_short(),
                             "Remote particle registered (via doc)"
                         );
-                        self.remote_names.write().await.insert(name.clone(), remote.clone());
+                        self.remote_names
+                            .write()
+                            .await
+                            .insert(name.clone(), remote.clone());
                     }
                 }
 
                 if key_str.starts_with("pid/") {
-                    self.remote_pids.write().await.insert(registry_entry.pid, remote);
+                    self.remote_pids
+                        .write()
+                        .await
+                        .insert(registry_entry.pid, remote);
                 }
             }
             LiveEvent::ContentReady { hash } => {
@@ -203,7 +206,10 @@ impl DocRegistry {
                             addr: entry.addr,
                         };
 
-                        self.remote_pids.write().await.insert(entry.pid, remote.clone());
+                        self.remote_pids
+                            .write()
+                            .await
+                            .insert(entry.pid, remote.clone());
                         if let Some(name) = entry.name {
                             self.remote_names.write().await.insert(name, remote);
                         }
@@ -240,7 +246,9 @@ impl DocRegistry {
 
         // Write pid entry
         let pid_key = format!("pid/{}", pid);
-        self.doc.set_bytes(self.author, pid_key, bytes.clone()).await?;
+        self.doc
+            .set_bytes(self.author, pid_key, bytes.clone())
+            .await?;
 
         // Write name entry if present
         if let Some(name) = name {

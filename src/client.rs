@@ -2,9 +2,7 @@ use anyhow::{Context, Result};
 use iroh::{Endpoint, EndpointAddr};
 
 use crate::runtime::PLASMOID_ALPN;
-use crate::wire::{
-    self, Command, CommandResponse, SendRequest, SpawnRequest, SpawnResult, Target,
-};
+use crate::wire::{self, Command, CommandResponse, SendRequest, SpawnRequest, SpawnResult, Target};
 
 /// A client for node-level operations (spawn, send).
 pub struct NodeClient {
@@ -39,10 +37,7 @@ impl NodeClient {
             CommandResponse::Spawn(spawn_response) => spawn_response
                 .result
                 .map_err(|e| anyhow::anyhow!("spawn failed: {}", e)),
-            other => anyhow::bail!(
-                "unexpected response type: expected Spawn, got {:?}",
-                other
-            ),
+            other => anyhow::bail!("unexpected response type: expected Spawn, got {:?}", other),
         }
     }
 
@@ -59,16 +54,12 @@ impl NodeClient {
             CommandResponse::Send(send_response) => send_response
                 .result
                 .map_err(|e| anyhow::anyhow!("send failed: {}", e)),
-            other => anyhow::bail!(
-                "unexpected response type: expected Send, got {:?}",
-                other
-            ),
+            other => anyhow::bail!("unexpected response type: expected Send, got {:?}", other),
         }
     }
 
     async fn send_command(&self, command: &Command) -> Result<CommandResponse> {
-        let request_bytes =
-            wire::serialize(command).context("failed to serialize command")?;
+        let request_bytes = wire::serialize(command).context("failed to serialize command")?;
 
         let conn = self
             .endpoint

@@ -1,8 +1,8 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use iroh::EndpointId;
+use plasmoid::Runtime;
 use plasmoid::client::NodeClient;
 use plasmoid::policy::PolicySet;
-use plasmoid::Runtime;
 use std::path::{Path, PathBuf};
 use tracing_subscriber::EnvFilter;
 
@@ -163,9 +163,9 @@ async fn cmd_start(args: &[String]) -> Result<()> {
                             i += 2;
                         }
                         "--init" => {
-                            let wave = args
-                                .get(i + 1)
-                                .ok_or_else(|| anyhow::anyhow!("--init requires a wasm-wave expression"))?;
+                            let wave = args.get(i + 1).ok_or_else(|| {
+                                anyhow::anyhow!("--init requires a wasm-wave expression")
+                            })?;
                             init_args = wave.clone();
                             i += 2;
                         }
@@ -327,9 +327,7 @@ async fn cmd_spawn(args: &[String]) -> Result<()> {
         Some(id) => id,
         None => {
             let bootstrap = std::env::var("PLASMOID_NODE").map_err(|_| {
-                anyhow::anyhow!(
-                    "no --node specified and PLASMOID_NODE env var is not set"
-                )
+                anyhow::anyhow!("no --node specified and PLASMOID_NODE env var is not set")
             })?;
             bootstrap
                 .parse()

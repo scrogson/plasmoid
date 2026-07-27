@@ -12,4 +12,4 @@ pub mod wire;
 
 pub use pid::Pid;
 pub use registry::ParticleRegistry;
-pub use runtime::{Runtime, PLASMOID_ALPN};
+pub use runtime::{PLASMOID_ALPN, Runtime};

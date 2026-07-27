@@ -1,5 +1,5 @@
-use plasmoid::policy::PolicySet;
 use plasmoid::Runtime;
+use plasmoid::policy::PolicySet;
 use std::path::Path;
 use std::time::Duration;
 

@@ -116,8 +116,7 @@ fn expand_main_struct(item_struct: ItemStruct) -> TokenStream {
 #[proc_macro_attribute]
 pub fn gen_server(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let impl_block = parse_macro_input!(item as syn::ItemImpl);
-    expand_gen_server(impl_block)
-        .unwrap_or_else(|e| e.to_compile_error().into())
+    expand_gen_server(impl_block).unwrap_or_else(|e| e.to_compile_error().into())
 }
 
 fn expand_gen_server(impl_block: syn::ItemImpl) -> Result<TokenStream, syn::Error> {

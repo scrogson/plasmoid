@@ -2,12 +2,12 @@ use crate::doc_registry::DocRegistry;
 use crate::registry::ParticleRegistry;
 use crate::runtime::start_process;
 use crate::wire::{
-    deserialize, serialize, Command, CommandResponse, SendRequest, SendResponse,
-    SpawnRequest, SpawnResponse, SpawnResult, Target,
+    Command, CommandResponse, SendRequest, SendResponse, SpawnRequest, SpawnResponse, SpawnResult,
+    Target, deserialize, serialize,
 };
+use iroh::Endpoint;
 use iroh::endpoint::Connection;
 use iroh::protocol::AcceptError;
-use iroh::Endpoint;
 use std::sync::Arc;
 use wasmtime::Engine;
 
@@ -60,15 +60,8 @@ impl iroh::protocol::ProtocolHandler for PlasmoidProtocol {
             let doc_registry = self.doc_registry.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = handle_stream(
-                    send,
-                    recv,
-                    registry,
-                    engine,
-                    endpoint,
-                    doc_registry,
-                )
-                .await
+                if let Err(e) =
+                    handle_stream(send, recv, registry, engine, endpoint, doc_registry).await
                 {
                     tracing::error!(error = %e, "Stream handler error");
                 }
@@ -99,9 +92,7 @@ async fn handle_stream(
     };
 
     let result = match command {
-        Command::Send(request) => {
-            handle_send(request, registry).await
-        }
+        Command::Send(request) => handle_send(request, registry).await,
         Command::Spawn(request) => {
             handle_spawn(request, registry, engine, endpoint, doc_registry).await
         }
@@ -114,10 +105,7 @@ async fn handle_stream(
     Ok(())
 }
 
-async fn handle_send(
-    request: SendRequest,
-    registry: Arc<ParticleRegistry>,
-) -> CommandResponse {
+async fn handle_send(request: SendRequest, registry: Arc<ParticleRegistry>) -> CommandResponse {
     tracing::debug!(target = ?request.target, "Received send request");
 
     // Resolve the target
@@ -137,9 +125,7 @@ async fn handle_send(
 
     // Send the message to the process mailbox
     match registry.send_to_pid(&pid, request.msg).await {
-        Ok(()) => CommandResponse::Send(SendResponse {
-            result: Ok(()),
-        }),
+        Ok(()) => CommandResponse::Send(SendResponse { result: Ok(()) }),
         Err(e) => CommandResponse::Send(SendResponse {
             result: Err(format!("{}", e)),
         }),
@@ -171,7 +157,11 @@ async fn handle_spawn(
 
     // Spawn in registry
     let (pid, mailbox) = match registry
-        .spawn(&request.component, request.name.as_deref(), Some(caps.clone()))
+        .spawn(
+            &request.component,
+            request.name.as_deref(),
+            Some(caps.clone()),
+        )
         .await
     {
         Ok(result) => result,

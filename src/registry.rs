@@ -3,13 +3,13 @@ use crate::message::{ExitReason, SystemMessage};
 use crate::pid::{Pid, PidGenerator};
 use crate::policy::PolicySet;
 use crate::runtime::WasmActor;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::RwLock;
-use wasmtime::component::Component;
 use wasmtime::Engine;
+use wasmtime::component::Component;
 
 /// A compiled component (WASM component) that can be spawned as particles.
 pub struct ComponentTemplate {
@@ -179,12 +179,7 @@ impl ParticleRegistry {
 
     /// List all registered component names.
     pub async fn list_components(&self) -> Vec<String> {
-        self.components
-            .read()
-            .await
-            .keys()
-            .cloned()
-            .collect()
+        self.components.read().await.keys().cloned().collect()
     }
 
     /// List all running particles.
@@ -243,9 +238,7 @@ impl ParticleRegistry {
     /// Send a user message to a process by PID.
     pub async fn send_to_pid(&self, pid: &Pid, msg: Vec<u8>) -> Result<(), SendError> {
         let states = self.process_states.read().await;
-        let state = states
-            .get(pid)
-            .ok_or(SendError::NoProcess)?;
+        let state = states.get(pid).ok_or(SendError::NoProcess)?;
         let mailbox = state.mailbox.clone();
         drop(states);
         mailbox.push_data(msg).await.map_err(|e| match e {
@@ -262,9 +255,7 @@ impl ParticleRegistry {
         msg: Vec<u8>,
     ) -> Result<(), SendError> {
         let states = self.process_states.read().await;
-        let state = states
-            .get(pid)
-            .ok_or(SendError::NoProcess)?;
+        let state = states.get(pid).ok_or(SendError::NoProcess)?;
         let mailbox = state.mailbox.clone();
         drop(states);
         mailbox.push_tagged(ref_id, msg).await.map_err(|e| match e {
@@ -324,11 +315,13 @@ impl ParticleRegistry {
             if let Some(watcher_state) = states.get(watcher) {
                 let mailbox = watcher_state.mailbox.clone();
                 drop(states);
-                mailbox.push_system(SystemMessage::Down {
-                    from: target.clone(),
-                    monitor_ref,
-                    reason: ExitReason::Normal,
-                }).await;
+                mailbox
+                    .push_system(SystemMessage::Down {
+                        from: target.clone(),
+                        monitor_ref,
+                        reason: ExitReason::Normal,
+                    })
+                    .await;
             }
             return Ok(monitor_ref);
         }
@@ -397,7 +390,10 @@ impl ParticleRegistry {
                 names.remove(name);
                 Ok(())
             }
-            Some(_) => Err(anyhow!("name '{}' is registered to a different process", name)),
+            Some(_) => Err(anyhow!(
+                "name '{}' is registered to a different process",
+                name
+            )),
             None => Err(anyhow!("name '{}' is not registered", name)),
         }
     }
@@ -492,19 +488,23 @@ impl ParticleRegistry {
 
         // Deliver exit signals outside the lock
         for mailbox in exit_deliveries {
-            mailbox.push_system(SystemMessage::Exit {
-                from: pid.clone(),
-                reason: propagated_reason.clone(),
-            }).await;
+            mailbox
+                .push_system(SystemMessage::Exit {
+                    from: pid.clone(),
+                    reason: propagated_reason.clone(),
+                })
+                .await;
         }
 
         // Deliver down signals outside the lock
         for (mailbox, monitor_ref) in down_deliveries {
-            mailbox.push_system(SystemMessage::Down {
-                from: pid.clone(),
-                monitor_ref,
-                reason: propagated_reason.clone(),
-            }).await;
+            mailbox
+                .push_system(SystemMessage::Down {
+                    from: pid.clone(),
+                    monitor_ref,
+                    reason: propagated_reason.clone(),
+                })
+                .await;
         }
 
         // Step 3 (continued): Cascade kills outside the lock to avoid deadlock
@@ -622,13 +622,13 @@ mod tests {
         let (pid, mailbox) = spawn_test_process(&registry).await;
 
         // Send a message
-        registry
-            .send_to_pid(&pid, b"hello".to_vec())
-            .await
-            .unwrap();
+        registry.send_to_pid(&pid, b"hello".to_vec()).await.unwrap();
 
         // Receive it
-        let msg = mailbox.recv(Some(Duration::from_millis(100))).await.unwrap();
+        let msg = mailbox
+            .recv(Some(Duration::from_millis(100)))
+            .await
+            .unwrap();
         match msg {
             crate::mailbox::MailboxMessage::Data(data) => assert_eq!(data, b"hello"),
             other => panic!("expected Data, got {:?}", other),
@@ -706,7 +706,10 @@ mod tests {
         assert!(registry.process_exists(&pid_b).await);
 
         // b should have received an Exit system message
-        let msg = mailbox_b.recv(Some(Duration::from_millis(100))).await.unwrap();
+        let msg = mailbox_b
+            .recv(Some(Duration::from_millis(100)))
+            .await
+            .unwrap();
         match msg {
             crate::mailbox::MailboxMessage::Exit { from, reason } => {
                 assert_eq!(from, pid_a);
@@ -731,7 +734,10 @@ mod tests {
             .await;
 
         // Watcher should have received a Down system message
-        let msg = mailbox_watcher.recv(Some(Duration::from_millis(100))).await.unwrap();
+        let msg = mailbox_watcher
+            .recv(Some(Duration::from_millis(100)))
+            .await
+            .unwrap();
         match msg {
             crate::mailbox::MailboxMessage::Down {
                 from,
@@ -805,7 +811,10 @@ mod tests {
         let monitor_ref = registry.monitor(&watcher_pid, &dead_pid).await.unwrap();
 
         // Should immediately receive Down
-        let msg = mailbox_watcher.recv(Some(Duration::from_millis(100))).await.unwrap();
+        let msg = mailbox_watcher
+            .recv(Some(Duration::from_millis(100)))
+            .await
+            .unwrap();
         match msg {
             crate::mailbox::MailboxMessage::Down {
                 from,
@@ -839,7 +848,10 @@ mod tests {
         assert!(registry.process_exists(&pid_b).await);
 
         // b should have received an Exit with Shutdown("killed")
-        let msg = mailbox_b.recv(Some(Duration::from_millis(100))).await.unwrap();
+        let msg = mailbox_b
+            .recv(Some(Duration::from_millis(100)))
+            .await
+            .unwrap();
         match msg {
             crate::mailbox::MailboxMessage::Exit { reason, .. } => {
                 assert_eq!(reason, ExitReason::Shutdown("killed".into()));

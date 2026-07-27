@@ -1,4 +1,4 @@
-use plasmoid::host::{log_message, HostState, LogLevel};
+use plasmoid::host::{HostState, LogLevel, log_message};
 use plasmoid::pid::Pid;
 use plasmoid::policy::PolicySet;
 

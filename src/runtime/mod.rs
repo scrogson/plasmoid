@@ -3,5 +3,5 @@ mod engine;
 pub mod invoke;
 
 pub use actor::WasmActor;
-pub use engine::{Runtime, PLASMOID_ALPN};
+pub use engine::{PLASMOID_ALPN, Runtime};
 pub use invoke::start_process;
