@@ -279,10 +279,38 @@ impl Runtime {
     pub async fn run(&self) -> Result<()> {
         tracing::info!(node_id = %self.node_id(), "Runtime running");
 
-        tokio::signal::ctrl_c().await?;
+        wait_for_shutdown_signal().await?;
         tracing::info!("Shutting down");
 
+        // Deregister before tearing down the router, so peers stop resolving
+        // this node's particles immediately rather than waiting to notice the
+        // connection is gone.
+        self.doc_registry.announce_all_down().await;
+
         self.router.shutdown().await?;
+        Ok(())
+    }
+}
+
+/// Wait for an orderly shutdown signal.
+///
+/// SIGTERM matters as much as ctrl-c here: container runtimes send it, and a
+/// node that misses it dies without deregistering, leaving peers advertising
+/// particles that are gone.
+async fn wait_for_shutdown_signal() -> Result<()> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term = signal(SignalKind::terminate())?;
+        tokio::select! {
+            r = tokio::signal::ctrl_c() => r?,
+            _ = term.recv() => {}
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await?;
         Ok(())
     }
 }

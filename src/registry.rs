@@ -7,7 +7,7 @@ use anyhow::{Result, anyhow};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, broadcast};
 use wasmtime::Engine;
 use wasmtime::component::Component;
 
@@ -45,7 +45,21 @@ pub struct ParticleRegistry {
     components: RwLock<HashMap<String, ComponentTemplate>>,
     particle_states: RwLock<HashMap<Pid, ParticleState>>,
     next_ref: AtomicU64,
+    deaths: broadcast::Sender<ParticleDeath>,
 }
+
+/// Broadcast when a particle dies, so observers can react after the fact.
+///
+/// The registered name rides along because `exit_particle` has already removed
+/// it by the time a subscriber runs — there is no way to look it up afterwards.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParticleDeath {
+    pub pid: Pid,
+    pub name: Option<String>,
+}
+
+/// How many deaths may queue for a slow subscriber before the oldest are dropped.
+const DEATH_BROADCAST_CAPACITY: usize = 1024;
 
 impl std::fmt::Debug for ParticleRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -63,7 +77,16 @@ impl ParticleRegistry {
             components: RwLock::new(HashMap::new()),
             particle_states: RwLock::new(HashMap::new()),
             next_ref: AtomicU64::new(1),
+            deaths: broadcast::channel(DEATH_BROADCAST_CAPACITY).0,
         }
+    }
+
+    /// Subscribe to particle deaths.
+    ///
+    /// Every death is published exactly once, including deaths cascaded through
+    /// links, because they all funnel through [`Self::exit_particle`].
+    pub fn subscribe_deaths(&self) -> broadcast::Receiver<ParticleDeath> {
+        self.deaths.subscribe()
     }
 
     /// Register a compiled component (WASM component) by name.
@@ -430,15 +453,23 @@ impl ParticleRegistry {
         // Close the mailbox to wake any blocked recv
         particle_state.mailbox.close().await;
 
-        // Remove particle entry
-        {
+        // Remove particle entry, keeping the name so it can ride along on the
+        // death broadcast — observers cannot look it up once it is gone.
+        let registered_name = {
             let entry = self.particles.write().await.remove(pid);
-            if let Some(ref entry) = entry
-                && let Some(ref name) = entry.name
-            {
+            let name = entry.and_then(|e| e.name);
+            if let Some(ref name) = name {
                 self.names.write().await.remove(name);
             }
-        }
+            name
+        };
+
+        // Publish the death. Send fails only when nobody is listening, which is
+        // the normal case for a node with no distributed registry attached.
+        let _ = self.deaths.send(ParticleDeath {
+            pid: pid.clone(),
+            name: registered_name,
+        });
 
         let links = particle_state.links;
         let monitored_by = particle_state.monitored_by;
@@ -578,6 +609,102 @@ mod tests {
         let node = key.public();
         let engine = make_engine();
         Arc::new(ParticleRegistry::new(PidGenerator::new(node), engine))
+    }
+
+    #[tokio::test]
+    async fn test_exit_broadcasts_death() {
+        let registry = make_registry();
+        let mut deaths = registry.subscribe_deaths();
+        let (pid, _mb) = spawn_test_particle(&registry).await;
+
+        registry.exit_particle(&pid, ExitReason::Normal).await;
+
+        let death = deaths.try_recv().expect("exit should broadcast a death");
+        assert_eq!(death.pid, pid);
+        assert_eq!(death.name, None);
+    }
+
+    #[tokio::test]
+    async fn test_death_carries_registered_name() {
+        let registry = make_registry();
+        let mut deaths = registry.subscribe_deaths();
+        let (pid, _mb) = spawn_test_particle(&registry).await;
+        registry
+            .particles
+            .write()
+            .await
+            .insert(pid.clone(), test_entry(&pid, Some("counter")));
+        registry
+            .names
+            .write()
+            .await
+            .insert("counter".to_string(), pid.clone());
+
+        registry.exit_particle(&pid, ExitReason::Normal).await;
+
+        // The name must ride along on the event: by the time a subscriber reacts,
+        // exit_particle has already removed it from the registry, so it cannot be
+        // looked up after the fact.
+        let death = deaths.try_recv().expect("exit should broadcast a death");
+        assert_eq!(death.name.as_deref(), Some("counter"));
+    }
+
+    #[tokio::test]
+    async fn test_exiting_twice_broadcasts_once() {
+        let registry = make_registry();
+        let mut deaths = registry.subscribe_deaths();
+        let (pid, _mb) = spawn_test_particle(&registry).await;
+
+        registry.exit_particle(&pid, ExitReason::Normal).await;
+        registry.exit_particle(&pid, ExitReason::Normal).await;
+
+        assert!(deaths.try_recv().is_ok());
+        assert!(
+            deaths.try_recv().is_err(),
+            "a second exit of the same pid must not broadcast again"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cascading_exit_broadcasts_each_death() {
+        let registry = make_registry();
+        let mut deaths = registry.subscribe_deaths();
+        let (pid_a, _a) = spawn_test_particle(&registry).await;
+        let (pid_b, _b) = spawn_test_particle(&registry).await;
+        registry.link(&pid_a, &pid_b).await.unwrap();
+
+        // b is not trapping exits, so an abnormal exit of a cascades into b.
+        registry
+            .exit_particle(&pid_a, ExitReason::Exception("crash".into()))
+            .await;
+
+        let mut dead: Vec<Pid> = Vec::new();
+        while let Ok(d) = deaths.try_recv() {
+            dead.push(d.pid);
+        }
+        assert!(dead.contains(&pid_a), "origin death should broadcast");
+        assert!(
+            dead.contains(&pid_b),
+            "link-propagated death should broadcast too"
+        );
+    }
+
+    /// Helper to build a ParticleEntry for tests that need a named particle.
+    fn test_entry(pid: &Pid, name: Option<&str>) -> ParticleEntry {
+        ParticleEntry {
+            pid: pid.clone(),
+            code: LoadedComponent::from_component(
+                Component::from_binary(&make_engine(), &wat_noop()).unwrap(),
+                PolicySet::all(),
+            ),
+            component_name: "test".to_string(),
+            name: name.map(|s| s.to_string()),
+        }
+    }
+
+    /// Smallest valid component binary, for entries that never get instantiated.
+    fn wat_noop() -> Vec<u8> {
+        wat::parse_str(r#"(component)"#).unwrap()
     }
 
     /// Helper to create a particle state directly for testing (no WASM needed).
