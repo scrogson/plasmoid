@@ -41,7 +41,8 @@ cargo test --workspace     # build the components first — see Gotchas
 ## Conventions
 
 - **Vocabulary is fixed.** A running WASM instance is a **particle** — never *actor*, never *process*. Neither word appears anywhere in the code any more. The WIT interface particles import is `host`; a compiled component is a `LoadedComponent`. Full glossary in `CONTEXT.md`.
-- **`wit/world.wit` is the contract.** Both host (`wasmtime::component::bindgen!`) and guest (`wit-bindgen`) derive from it. Changing it is a breaking change for every component and needs a package version bump.
+- **Breaking changes are free.** Nothing consumes Plasmoid yet. Until packages are published, make the right change: rename it, bump the version, update every call site. No compat shims, no deprecation stubs, no asking permission because something is breaking. Getting the system working beats protecting an API nobody uses.
+- **`wit/world.wit` is the contract.** Both host (`wasmtime::component::bindgen!`) and guest (`wit-bindgen`) derive from it. Changing it means bumping the package version and rebuilding every component — three on-disk copies must stay in sync (`wit/world.wit`, `wit/components/deps/runtime/`, `wit/components/ring/deps/runtime/`), plus the copy embedded in `src/main.rs` for the scaffolder.
 - **Verify before documenting.** Grep for the symbol, run the command. This repo accumulated ~1100 lines of documentation describing a system that had been replaced underneath it; the cleanup is tracked in [#1](https://github.com/scrogson/plasmoid/issues/1).
 
 ## Gotchas
