@@ -91,7 +91,7 @@ mod tests {
 
     #[test]
     fn test_pid_display() {
-        let key = iroh::SecretKey::generate(&mut rand::rng());
+        let key = iroh::SecretKey::generate();
         let node = key.public();
         let pid = Pid { node, seq: 42 };
         let display = pid.to_string();
@@ -107,7 +107,7 @@ mod tests {
 
     #[test]
     fn test_pid_generator() {
-        let key = iroh::SecretKey::generate(&mut rand::rng());
+        let key = iroh::SecretKey::generate();
         let node = key.public();
         let pid_gen = PidGenerator::new(node);
 
@@ -124,8 +124,8 @@ mod tests {
 
     #[test]
     fn test_pid_is_local_to() {
-        let key1 = iroh::SecretKey::generate(&mut rand::rng());
-        let key2 = iroh::SecretKey::generate(&mut rand::rng());
+        let key1 = iroh::SecretKey::generate();
+        let key2 = iroh::SecretKey::generate();
         let node1 = key1.public();
         let node2 = key2.public();
 
@@ -139,7 +139,7 @@ mod tests {
 
     #[test]
     fn test_pid_node_prefix() {
-        let key = iroh::SecretKey::generate(&mut rand::rng());
+        let key = iroh::SecretKey::generate();
         let node = key.public();
         let pid = Pid { node, seq: 1 };
         let prefix = pid.node_prefix();

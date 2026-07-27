@@ -574,7 +574,7 @@ mod tests {
     }
 
     fn make_registry() -> Arc<ParticleRegistry> {
-        let key = SecretKey::generate(&mut rand::rng());
+        let key = SecretKey::generate();
         let node = key.public();
         let engine = make_engine();
         Arc::new(ParticleRegistry::new(PidGenerator::new(node), engine))
@@ -605,7 +605,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_spawn_returns_mailbox() {
-        let key = SecretKey::generate(&mut rand::rng());
+        let key = SecretKey::generate();
         let node = key.public();
         let engine = make_engine();
         let registry = ParticleRegistry::new(PidGenerator::new(node), engine);
@@ -775,7 +775,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_name_uniqueness() {
-        let key = SecretKey::generate(&mut rand::rng());
+        let key = SecretKey::generate();
         let node = key.public();
         let engine = make_engine();
         let registry = ParticleRegistry::new(PidGenerator::new(node), engine);

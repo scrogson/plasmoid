@@ -96,7 +96,7 @@ fn test_roundtrip_command_response_send() {
 
 #[test]
 fn test_roundtrip_command_response_spawn() {
-    let node_key = iroh::SecretKey::generate(&mut rand::rng());
+    let node_key = iroh::SecretKey::generate();
     let pid = Pid { node: node_key.public(), seq: 1 };
 
     let resp = CommandResponse::Spawn(SpawnResponse {
@@ -115,7 +115,7 @@ fn test_roundtrip_command_response_spawn() {
 
 #[test]
 fn test_roundtrip_send_request_with_pid_target() {
-    let node_key = iroh::SecretKey::generate(&mut rand::rng());
+    let node_key = iroh::SecretKey::generate();
     let pid = Pid { node: node_key.public(), seq: 42 };
 
     let req = SendRequest {

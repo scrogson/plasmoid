@@ -9,10 +9,12 @@ edition = "2024"
 
 [dependencies]
 # Networking
-iroh = { version = "0.96", features = ["address-lookup-mdns"] }
-iroh-gossip = "0.96"
-iroh-docs = "0.96"
-iroh-blobs = "0.98"
+iroh = "1.0"
+# mDNS address lookup moved out of the `iroh` crate in 1.0
+iroh-mdns-address-lookup = "0.4"
+iroh-gossip = "0.101"
+iroh-docs = "0.101"
+iroh-blobs = "0.103"
 
 # Encoding
 hex = "0.4"
@@ -43,9 +45,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Error handling
 anyhow = "1"
 thiserror = "2"
-
-# RNG
-rand = "0.9"
 
 [dev-dependencies]
 tempfile = "3"

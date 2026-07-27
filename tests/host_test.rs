@@ -3,7 +3,7 @@ use plasmoid::pid::Pid;
 use plasmoid::policy::PolicySet;
 
 fn make_test_pid() -> Pid {
-    let key = iroh::SecretKey::generate(&mut rand::rng());
+    let key = iroh::SecretKey::generate();
     Pid {
         node: key.public(),
         seq: 1,

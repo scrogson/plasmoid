@@ -218,7 +218,7 @@ interface process {
 
 | Component | Crate | Purpose |
 |---|---|---|
-| Networking | `iroh` 0.96 | QUIC mesh with mDNS discovery |
+| Networking | `iroh` 1.0 | QUIC mesh with mDNS discovery (`iroh-mdns-address-lookup`) |
 | WASM Runtime | `wasmtime` 41 | Component model execution |
 | Authorization | `cedar-policy` 4 | Capability-based access control |
 | Serialization | `postcard` 1 | Binary message encoding |

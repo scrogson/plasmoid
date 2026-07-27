@@ -51,7 +51,7 @@ fn load_or_generate_secret_key(data_dir: &Path) -> Result<SecretKey> {
         Ok(key)
     } else {
         std::fs::create_dir_all(data_dir)?;
-        let key = SecretKey::generate(&mut rand::rng());
+        let key = SecretKey::generate();
         std::fs::write(&key_path, key.to_bytes())?;
 
         // Write public node ID for easy scripting
@@ -86,12 +86,12 @@ impl Runtime {
         // Load or generate secret key
         let secret_key = match data_dir {
             Some(dir) => load_or_generate_secret_key(dir)?,
-            None => SecretKey::generate(&mut rand::rng()),
+            None => SecretKey::generate(),
         };
 
         // Configure iroh endpoint with mDNS for local network discovery
-        let mdns = iroh::address_lookup::mdns::MdnsAddressLookup::builder();
-        let endpoint = Endpoint::builder()
+        let mdns = iroh_mdns_address_lookup::MdnsAddressLookup::builder();
+        let endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
             .secret_key(secret_key)
             .address_lookup(mdns)
             .bind()

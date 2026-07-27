@@ -337,8 +337,8 @@ async fn cmd_spawn(args: &[String]) -> Result<()> {
         }
     };
 
-    let mdns = iroh::address_lookup::mdns::MdnsAddressLookup::builder();
-    let endpoint = iroh::Endpoint::builder()
+    let mdns = iroh_mdns_address_lookup::MdnsAddressLookup::builder();
+    let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
         .address_lookup(mdns)
         .bind()
         .await?;
@@ -381,8 +381,8 @@ async fn cmd_send(args: &[String]) -> Result<()> {
         }
     };
 
-    let mdns = iroh::address_lookup::mdns::MdnsAddressLookup::builder();
-    let endpoint = iroh::Endpoint::builder()
+    let mdns = iroh_mdns_address_lookup::MdnsAddressLookup::builder();
+    let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
         .address_lookup(mdns)
         .bind()
         .await?;

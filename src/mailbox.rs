@@ -183,7 +183,7 @@ mod tests {
     use std::sync::Arc;
 
     fn make_pid() -> Pid {
-        let key = SecretKey::generate(&mut rand::rng());
+        let key = SecretKey::generate();
         Pid { node: key.public(), seq: 1 }
     }
 
