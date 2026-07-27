@@ -30,7 +30,13 @@ cd components/echo && cargo component build --release
 # -> target/wasm32-wasip1/release/echo.wasm
 ```
 
-Neither `cargo fmt --check` nor `cargo clippy` is currently clean. Don't treat them as gates, and don't reformat unrelated files while fixing something else.
+CI (`.github/workflows/ci.yml`) enforces three gates on every push and PR. Run them before claiming work is done:
+
+```bash
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace     # build the components first — see Gotchas
+```
 
 ## Conventions
 
@@ -41,7 +47,9 @@ Neither `cargo fmt --check` nor `cargo clippy` is currently clean. Don't treat t
 ## Gotchas
 
 - **`components/echo` and `components/ring` are excluded from the workspace** (`Cargo.toml:3`) and carry their own lockfiles. `cargo check --workspace` **does not cover them**, and `cargo component build -p echo` from the root fails with `package ID specification 'echo' did not match any packages`. Build from inside the component directory. (In an app scaffolded by `plasmoid new`, components *are* workspace members, so `-p <name>` works there.)
+- **`cargo test` can report a hollow green.** The e2e tests look for `components/echo/target/wasm32-wasip1/release/echo.wasm` on disk and **silently skip** when it's missing — still printing `test result: ok`, with an unchanged test count. Build the components before trusting a passing run. CI builds them and fails if the skip message appears.
 - **iroh rejects self-connection** — `ConnectWithOptsError::SelfConnect`. A test that connects needs two endpoints, not one.
+- **Don't swap the `cargo install cargo-component` step in CI for an install action.** cargo-component isn't in `taiki-e/install-action`'s manifests and publishes no release binaries, so `cargo-binstall` can't fetch it either.
 - **`plasmoid component new` scaffolds raw `wit-bindgen`**, not the SDK — no `plasmoid-sdk` dependency and no `#[main]`. A freshly scaffolded component looks nothing like the examples in `README.md`.
 - **`mise run ring:run` is broken.** It invokes `plasmoid call`, which was replaced by `plasmoid send` and now exits with an error. `call` and `run` survive only as deprecation stubs.
 - **`spawn` is not in the SDK prelude.** It resolves inside `#[plasmoid_sdk::main]` because the macro emits `use crate::bindings::plasmoid::runtime::process::*`.
