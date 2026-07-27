@@ -6,6 +6,7 @@ exclude = ["components/echo", "components/ring"]
 name = "plasmoid"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 
 [dependencies]
 # Networking

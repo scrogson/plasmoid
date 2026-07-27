@@ -2,6 +2,7 @@
 name = "plasmoid-sdk"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 
 [dependencies]
 plasmoid-macros = { path = "../plasmoid-macros" }

@@ -1,14 +1,18 @@
 # Plasmoid
 
-A distributed WASM actor runtime on [iroh](https://iroh.computer) mesh networking with [WIT](https://component-model.bytecodealliance.org/design/wit.html) interfaces and [Cedar](https://www.cedarpolicy.com/) authorization.
+A distributed particle runtime for WebAssembly components, built on [iroh](https://iroh.computer).
 
-Actors (called **particles**) are WebAssembly components that communicate via message passing, run in sandboxed isolation, and can be deployed across a mesh of interconnected nodes.
+A **particle** is a running WASM component instance with its own mailbox, an unforgeable identity, and the ability to link to and monitor other particles — an Erlang-style concurrency model in a sandbox, with [WIT](https://component-model.bytecodealliance.org/design/wit.html) as the host/guest contract.
+
+> Working toward full cross-node distribution — see [ROADMAP.md](./ROADMAP.md) for what's built and what isn't. Today particles run and message within a single node.
+
+See [CONTEXT.md](./CONTEXT.md) for the project's vocabulary.
 
 ## Quick Start
 
 ```bash
-# Build the runtime
-cargo build --release
+# Install the runtime
+cargo install --path .
 
 # Create a new application
 plasmoid new my-app
@@ -17,11 +21,11 @@ cd my-app
 # Create a component
 plasmoid component new greeter
 
-# Build the component
+# Build it (components are workspace members)
 cargo component build -p greeter --release
 
-# Start a node with the component
-plasmoid start greeter.wasm --spawn greeter --name greeter
+# Boot a node with the component loaded and one particle spawned
+plasmoid start target/wasm32-wasip1/release/greeter.wasm --spawn greeter --name greeter
 ```
 
 ## Architecture
@@ -30,24 +34,27 @@ plasmoid start greeter.wasm --spawn greeter --name greeter
 ┌─────────────────────────────────────────────┐
 │  Plasmoid Node                              │
 │                                             │
-│  ┌──────────────┐  ┌─────────────────────┐  │
-│  │ iroh Endpoint │  │ Particle Registry   │  │
-│  │ (QUIC mesh)   │  │ Component -> WASM   │  │
-│  └──────────────┘  └─────────────────────┘  │
-│                                             │
-│  ┌─────────┐  ┌─────────┐  ┌─────────┐     │
-│  │ WASM    │  │ WASM    │  │ WASM    │     │
-│  │ Particle│  │ Particle│  │ Particle│     │
-│  └─────────┘  └─────────┘  └─────────┘     │
+│  ┌───────────────┐  ┌─────────────────────┐ │
+│  │ iroh Endpoint │  │ Particle Registry   │ │
+│  │ (QUIC mesh)   │  │ pid  -> mailbox     │ │
+│  └───────────────┘  │ name -> pid         │ │
+│                     └─────────────────────┘ │
+│  ┌─────────┐  ┌─────────┐  ┌─────────┐      │
+│  │ WASM    │  │ WASM    │  │ WASM    │      │
+│  │ Particle│  │ Particle│  │ Particle│      │
+│  └─────────┘  └─────────┘  └─────────┘      │
 │                                             │
 │  ┌─────────────────────────────────────┐    │
-│  │ Host Functions (Cedar-gated)        │    │
-│  │ spawn, send, recv, log, link, ...   │    │
+│  │ Host Functions                      │    │
+│  │ spawn, send, recv, link, monitor,   │    │
+│  │ trap-exit, register, lookup, log    │    │
 │  └─────────────────────────────────────┘    │
 └─────────────────────────────────────────────┘
 ```
 
-Particles communicate through typed messages, can spawn child processes, and support OTP-style links and monitors for fault tolerance.
+Each particle has a bounded mailbox and receives messages sequentially — it never handles two at once, so its linear memory needs no locking. Particles can spawn other particles, and `link` / `monitor` / `trap-exit` provide the primitives OTP-style supervision is built from.
+
+Nodes form a peer-to-peer QUIC mesh with cryptographic identity, discovered over mDNS on the local network with relay fallback.
 
 ## Plasmoid SDK
 
@@ -86,6 +93,8 @@ fn start(init: MyInit) -> Result<(), String> {
     }
 }
 ```
+
+Runtime calls like `spawn` are not exported by the prelude — `#[plasmoid_sdk::main]` generates `mod bindings` and glob-imports the WIT interface, so every host function is in scope inside an annotated module.
 
 ### GenServer-style particles
 
@@ -153,7 +162,7 @@ impl Echo {
 
 ### Ring Benchmark
 
-Spawns N worker processes in a ring, passes M messages around:
+Spawns N worker particles in a ring and passes M messages around it:
 
 ```bash
 plasmoid start ring.wasm --spawn ring --init '{"orchestrator":[100,1000]}'
@@ -169,23 +178,43 @@ plasmoid spawn <component>           Spawn a particle on a running node
 plasmoid send <target> <message>     Send a message to a particle
 ```
 
+`spawn` and `send` accept a node id, so a running node can be driven from outside — `plasmoid send <node-id> <name> <message>`. This is operator-level access; particles themselves address only their own node.
+
 ## WIT Interface
 
-Particles interact with the runtime through a WIT-defined process interface:
+Particles import a WIT interface named `process` (the interface keeps the OTP term; the instance it serves is a particle). Abridged — see [`wit/world.wit`](./wit/world.wit) for the full contract:
 
 ```wit
 interface process {
+    resource pid { to-string: func() -> string; }
+
     // Identity
-    self-pid: func() -> pid;
-    spawn: func(component: string, name: option<string>, init-args: string) -> result<pid, spawn-error>;
+    self-pid:  func() -> pid;
+    self-name: func() -> option<string>;
+    make-ref:  func() -> u64;
+
+    // Lifecycle
+    spawn: func(component: string, name: option<string>, init-args: string)
+        -> result<pid, spawn-error>;
+    exit:  func(reason: exit-reason);
 
     // Messaging
-    send: func(target: borrow<pid>, msg: list<u8>) -> result<_, send-error>;
-    recv: func(timeout-ms: option<u64>) -> option<message>;
+    send:     func(target: borrow<pid>, msg: list<u8>) -> result<_, send-error>;
+    send-ref: func(target: borrow<pid>, ref: u64, msg: list<u8>) -> result<_, send-error>;
+    recv:     func(timeout-ms: option<u64>) -> option<message>;
+    recv-ref: func(ref: u64, timeout-ms: option<u64>) -> option<message>;
 
-    // Fault tolerance
-    link: func(target: borrow<pid>) -> result<_, link-error>;
-    monitor: func(target: borrow<pid>) -> u64;
+    // Naming
+    register:   func(name: string) -> result<_, registry-error>;
+    unregister: func(name: string) -> result<_, registry-error>;
+    lookup:     func(name: string) -> option<pid>;
+    resolve:    func(pid-string: string) -> option<pid>;
+
+    // Failure
+    link:      func(target: borrow<pid>) -> result<_, link-error>;
+    unlink:    func(target: borrow<pid>);
+    monitor:   func(target: borrow<pid>) -> u64;
+    demonitor: func(ref: u64);
     trap-exit: func(enabled: bool);
 
     // Logging
@@ -199,11 +228,13 @@ interface process {
 ├── Cargo.toml                 # Workspace root
 ├── src/                       # Runtime
 │   ├── main.rs                # CLI
-│   ├── runtime/               # WASM engine, actor lifecycle
-│   ├── host/                  # Host functions (logging, database)
-│   ├── registry.rs            # Process registry
-│   ├── mailbox.rs             # Per-process message queue
-│   ├── pid.rs                 # Process identifiers
+│   ├── runtime/               # WASM engine, particle lifecycle, invocation
+│   ├── host/                  # Host function implementations
+│   ├── registry.rs            # Particle registry (pids, names, links, monitors)
+│   ├── doc_registry.rs        # Replicated cross-node registry (iroh-docs)
+│   ├── mailbox.rs             # Per-particle message queue
+│   ├── pid.rs                 # Particle identifiers
+│   ├── protocol.rs            # ALPN handler for remote spawn/send
 │   └── client.rs              # Remote node client
 ├── crates/
 │   ├── plasmoid-sdk/          # Component authoring SDK
@@ -220,10 +251,9 @@ interface process {
 |---|---|---|
 | Networking | `iroh` 1.0 | QUIC mesh with mDNS discovery (`iroh-mdns-address-lookup`) |
 | WASM Runtime | `wasmtime` 41 | Component model execution |
-| Authorization | `cedar-policy` 4 | Capability-based access control |
 | Serialization | `postcard` 1 | Binary message encoding |
 | Async | `tokio` 1 | Async runtime |
 
 ## License
 
-MIT
+MIT — see [LICENSE](./LICENSE).
