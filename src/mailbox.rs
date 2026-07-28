@@ -4,8 +4,6 @@ use std::collections::VecDeque;
 use std::time::Duration;
 use tokio::sync::{Mutex, Notify};
 
-const DEFAULT_MAILBOX_CAPACITY: usize = 1024;
-
 #[derive(Debug, Clone)]
 pub enum MailboxMessage {
     Data(Vec<u8>),
@@ -27,13 +25,17 @@ pub enum MailboxMessage {
 #[derive(Debug)]
 pub enum SendError {
     NoParticle,
-    MailboxFull,
 }
 
+/// Mailboxes are deliberately unbounded, following Erlang.
+///
+/// `send` is fire-and-forget, so a bounded mailbox could only drop messages
+/// silently — invisible to sender and receiver alike. Letting a slow particle
+/// grow its mailbox until the node dies is loud and diagnosable instead, and
+/// overload is answered with supervision rather than backpressure.
 struct Inner {
     queue: VecDeque<MailboxMessage>,
     data_count: usize,
-    capacity: usize,
     closed: bool,
 }
 
@@ -48,31 +50,29 @@ impl std::fmt::Debug for Mailbox {
     }
 }
 
+impl Default for Mailbox {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Mailbox {
-    pub fn new(capacity: usize) -> Self {
+    pub fn new() -> Self {
         Self {
             inner: Mutex::new(Inner {
                 queue: VecDeque::new(),
                 data_count: 0,
-                capacity,
                 closed: false,
             }),
             notify: Notify::new(),
         }
     }
 
-    pub fn with_default_capacity() -> Self {
-        Self::new(DEFAULT_MAILBOX_CAPACITY)
-    }
-
-    /// Push a data message. Bounded by capacity.
+    /// Push a data message. Fails only if the particle is gone.
     pub async fn push_data(&self, msg: Vec<u8>) -> Result<(), SendError> {
         let mut inner = self.inner.lock().await;
         if inner.closed {
             return Err(SendError::NoParticle);
-        }
-        if inner.data_count >= inner.capacity {
-            return Err(SendError::MailboxFull);
         }
         inner.data_count += 1;
         inner.queue.push_back(MailboxMessage::Data(msg));
@@ -81,14 +81,11 @@ impl Mailbox {
         Ok(())
     }
 
-    /// Push a tagged message. Bounded by capacity.
+    /// Push a tagged message. Fails only if the particle is gone.
     pub async fn push_tagged(&self, ref_id: u64, payload: Vec<u8>) -> Result<(), SendError> {
         let mut inner = self.inner.lock().await;
         if inner.closed {
             return Err(SendError::NoParticle);
-        }
-        if inner.data_count >= inner.capacity {
-            return Err(SendError::MailboxFull);
         }
         inner.data_count += 1;
         inner
@@ -216,7 +213,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_push_data_and_recv() {
-        let mailbox = Mailbox::with_default_capacity();
+        let mailbox = Mailbox::new();
         mailbox.push_data(b"hello".to_vec()).await.unwrap();
         let msg = mailbox
             .recv(Some(Duration::from_millis(100)))
@@ -230,7 +227,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_push_tagged_and_recv_ref() {
-        let mailbox = Mailbox::with_default_capacity();
+        let mailbox = Mailbox::new();
         mailbox.push_data(b"unrelated".to_vec()).await.unwrap();
         mailbox.push_tagged(42, b"payload".to_vec()).await.unwrap();
         mailbox.push_data(b"also unrelated".to_vec()).await.unwrap();
@@ -261,7 +258,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_system_messages_at_front() {
-        let mailbox = Mailbox::with_default_capacity();
+        let mailbox = Mailbox::new();
         let pid = make_pid();
 
         mailbox.push_data(b"user msg".to_vec()).await.unwrap();
@@ -294,52 +291,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_system_messages_bypass_capacity() {
-        let mailbox = Mailbox::new(2);
-        let pid = make_pid();
+    async fn test_mailbox_is_unbounded() {
+        let mailbox = Mailbox::new();
 
-        // Fill to capacity
-        mailbox.push_data(b"1".to_vec()).await.unwrap();
-        mailbox.push_data(b"2".to_vec()).await.unwrap();
+        // Well past the 1024 bound this used to carry. `send` is fire-and-forget,
+        // so a bound could only drop these silently; growing instead is the point.
+        for i in 0..5_000u32 {
+            mailbox
+                .push_data(i.to_le_bytes().to_vec())
+                .await
+                .expect("an unbounded mailbox never refuses a message");
+        }
 
-        // Data should fail
-        assert!(mailbox.push_data(b"3".to_vec()).await.is_err());
-
-        // System message should succeed (unbounded)
-        mailbox
-            .push_system(SystemMessage::Exit {
-                from: pid,
-                reason: ExitReason::Normal,
-            })
-            .await;
+        // And the queue really holds them, in order.
+        for i in 0..5_000u32 {
+            match mailbox.recv(Some(Duration::from_millis(100))).await {
+                Some(MailboxMessage::Data(d)) => assert_eq!(d, i.to_le_bytes().to_vec()),
+                other => panic!("expected message {i}, got {other:?}"),
+            }
+        }
     }
 
     #[tokio::test]
     async fn test_timeout_returns_none() {
-        let mailbox = Mailbox::with_default_capacity();
+        let mailbox = Mailbox::new();
         let result = mailbox.recv(Some(Duration::from_millis(10))).await;
         assert!(result.is_none());
     }
 
     #[tokio::test]
-    async fn test_capacity_enforcement() {
-        let mailbox = Mailbox::new(2);
-        mailbox.push_data(b"1".to_vec()).await.unwrap();
-        mailbox.push_data(b"2".to_vec()).await.unwrap();
-
-        match mailbox.push_data(b"3".to_vec()).await {
-            Err(SendError::MailboxFull) => {}
-            other => panic!("expected MailboxFull, got {:?}", other.is_ok()),
-        }
-
-        // After consuming one, should be able to push again
-        mailbox.recv(Some(Duration::from_millis(10))).await.unwrap();
-        mailbox.push_data(b"3".to_vec()).await.unwrap();
-    }
-
-    #[tokio::test]
     async fn test_close_wakes_blocked_recv() {
-        let mailbox = Arc::new(Mailbox::with_default_capacity());
+        let mailbox = Arc::new(Mailbox::new());
         let mailbox2 = mailbox.clone();
 
         let handle = tokio::spawn(async move { mailbox2.recv(None).await });
@@ -354,7 +336,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_recv_ref_skips_non_matching() {
-        let mailbox = Mailbox::with_default_capacity();
+        let mailbox = Mailbox::new();
         let pid = make_pid();
 
         mailbox.push_tagged(1, b"wrong ref".to_vec()).await.unwrap();
@@ -392,7 +374,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_recv_ref_timeout_no_match() {
-        let mailbox = Mailbox::with_default_capacity();
+        let mailbox = Mailbox::new();
         mailbox.push_data(b"unrelated".to_vec()).await.unwrap();
 
         let result = mailbox.recv_ref(99, Some(Duration::from_millis(10))).await;

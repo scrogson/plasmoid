@@ -20,7 +20,6 @@ pub enum CastResult {
 
 pub enum CallError {
     Timeout,
-    SendFailed,
     Decode(String),
 }
 
@@ -28,7 +27,6 @@ impl core::fmt::Display for CallError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             CallError::Timeout => write!(f, "call timed out"),
-            CallError::SendFailed => write!(f, "send failed"),
             CallError::Decode(e) => write!(f, "decode error: {e}"),
         }
     }

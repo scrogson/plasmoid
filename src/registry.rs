@@ -144,7 +144,7 @@ impl ParticleRegistry {
         };
 
         // Create unified mailbox
-        let mailbox = Arc::new(Mailbox::with_default_capacity());
+        let mailbox = Arc::new(Mailbox::new());
 
         let particle_state = ParticleState {
             links: HashSet::new(),
@@ -181,6 +181,26 @@ impl ParticleRegistry {
         );
 
         Ok((pid, mailbox))
+    }
+
+    /// Register a mailbox under a fresh pid, with no component behind it.
+    ///
+    /// For tests that exercise delivery rather than execution — a real spawn
+    /// needs a compiled WASM component, which says nothing about routing.
+    #[doc(hidden)]
+    pub async fn insert_test_particle(&self, mailbox: Arc<Mailbox>) -> Pid {
+        let pid = self.pid_gen.next();
+        self.particle_states.write().await.insert(
+            pid.clone(),
+            ParticleState {
+                links: HashSet::new(),
+                monitors: HashMap::new(),
+                monitored_by: Vec::new(),
+                trap_exit: false,
+                mailbox,
+            },
+        );
+        pid
     }
 
     /// Look up a particle by PID.
@@ -266,7 +286,6 @@ impl ParticleRegistry {
         drop(states);
         mailbox.push_data(msg).await.map_err(|e| match e {
             crate::mailbox::SendError::NoParticle => SendError::NoParticle,
-            crate::mailbox::SendError::MailboxFull => SendError::MailboxFull,
         })
     }
 
@@ -283,7 +302,6 @@ impl ParticleRegistry {
         drop(states);
         mailbox.push_tagged(ref_id, msg).await.map_err(|e| match e {
             crate::mailbox::SendError::NoParticle => SendError::NoParticle,
-            crate::mailbox::SendError::MailboxFull => SendError::MailboxFull,
         })
     }
 
@@ -557,14 +575,12 @@ impl ParticleRegistry {
 #[derive(Debug, Clone, PartialEq)]
 pub enum SendError {
     NoParticle,
-    MailboxFull,
 }
 
 impl std::fmt::Display for SendError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SendError::NoParticle => write!(f, "no particle"),
-            SendError::MailboxFull => write!(f, "mailbox full"),
         }
     }
 }
@@ -711,7 +727,7 @@ mod tests {
     async fn spawn_test_particle(registry: &ParticleRegistry) -> (Pid, Arc<Mailbox>) {
         let pid = registry.pid_gen().next();
 
-        let mailbox = Arc::new(Mailbox::with_default_capacity());
+        let mailbox = Arc::new(Mailbox::new());
 
         let particle_state = ParticleState {
             links: HashSet::new(),
@@ -760,22 +776,6 @@ mod tests {
             crate::mailbox::MailboxMessage::Data(data) => assert_eq!(data, b"hello"),
             other => panic!("expected Data, got {:?}", other),
         }
-    }
-
-    #[tokio::test]
-    async fn test_bounded_mailbox_full() {
-        let registry = make_registry();
-        let (pid, _mailbox) = spawn_test_particle(&registry).await;
-
-        // Fill the mailbox to capacity (default 1024)
-        for i in 0..1024 {
-            let msg = vec![i as u8];
-            registry.send_to_pid(&pid, msg).await.unwrap();
-        }
-
-        // Next send should fail with MailboxFull
-        let result = registry.send_to_pid(&pid, b"overflow".to_vec()).await;
-        assert_eq!(result, Err(SendError::MailboxFull));
     }
 
     #[tokio::test]

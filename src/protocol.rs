@@ -21,6 +21,7 @@ pub struct PlasmoidProtocol {
     engine: Engine,
     endpoint: Endpoint,
     doc_registry: Option<Arc<DocRegistry>>,
+    peers: Arc<crate::transport::PeerLinks>,
 }
 
 impl PlasmoidProtocol {
@@ -29,12 +30,14 @@ impl PlasmoidProtocol {
         engine: Engine,
         endpoint: Endpoint,
         doc_registry: Option<Arc<DocRegistry>>,
+        peers: Arc<crate::transport::PeerLinks>,
     ) -> Self {
         Self {
             registry,
             engine,
             endpoint,
             doc_registry,
+            peers,
         }
     }
 }
@@ -46,26 +49,49 @@ impl iroh::protocol::ProtocolHandler for PlasmoidProtocol {
         tracing::debug!(remote = %remote, "Plasmoid connection accepted");
 
         loop {
-            let (send, recv) = match connection.accept_bi().await {
-                Ok(stream) => stream,
-                Err(e) => {
-                    tracing::debug!(error = %e, "Connection closed");
-                    break;
-                }
-            };
+            tokio::select! {
+                // Request/response: external clients doing spawn and send.
+                bi = connection.accept_bi() => {
+                    let (send, recv) = match bi {
+                        Ok(stream) => stream,
+                        Err(e) => {
+                            tracing::debug!(error = %e, "Connection closed");
+                            break;
+                        }
+                    };
 
-            let registry = self.registry.clone();
-            let engine = self.engine.clone();
-            let endpoint = self.endpoint.clone();
-            let doc_registry = self.doc_registry.clone();
+                    let registry = self.registry.clone();
+                    let engine = self.engine.clone();
+                    let endpoint = self.endpoint.clone();
+                    let doc_registry = self.doc_registry.clone();
+                    let peers = self.peers.clone();
 
-            tokio::spawn(async move {
-                if let Err(e) =
-                    handle_stream(send, recv, registry, engine, endpoint, doc_registry).await
-                {
-                    tracing::error!(error = %e, "Stream handler error");
+                    tokio::spawn(async move {
+                        if let Err(e) =
+                            handle_stream(send, recv, registry, engine, endpoint, doc_registry, peers).await
+                        {
+                            tracing::error!(error = %e, "Stream handler error");
+                        }
+                    });
                 }
-            });
+                // Particle messages: one ordered stream per peer node.
+                uni = connection.accept_uni() => {
+                    let recv = match uni {
+                        Ok(stream) => stream,
+                        Err(e) => {
+                            tracing::debug!(error = %e, "Connection closed");
+                            break;
+                        }
+                    };
+
+                    let registry = self.registry.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_message_link(recv, registry).await {
+                            tracing::debug!(error = %e, "Peer link ended");
+                        }
+                    });
+                }
+            }
         }
 
         Ok(())
@@ -79,6 +105,7 @@ async fn handle_stream(
     engine: Engine,
     endpoint: Endpoint,
     doc_registry: Option<Arc<DocRegistry>>,
+    peers: Arc<crate::transport::PeerLinks>,
 ) -> anyhow::Result<()> {
     let request_bytes = recv.read_to_end(1024 * 1024).await?;
 
@@ -94,7 +121,7 @@ async fn handle_stream(
     let result = match command {
         Command::Send(request) => handle_send(request, registry).await,
         Command::Spawn(request) => {
-            handle_spawn(request, registry, engine, endpoint, doc_registry).await
+            handle_spawn(request, registry, engine, endpoint, doc_registry, peers).await
         }
     };
 
@@ -138,6 +165,7 @@ async fn handle_spawn(
     engine: Engine,
     endpoint: Endpoint,
     doc_registry: Option<Arc<DocRegistry>>,
+    peers: Arc<crate::transport::PeerLinks>,
 ) -> CommandResponse {
     tracing::debug!(
         component = %request.component,
@@ -180,10 +208,13 @@ async fn handle_spawn(
         pid.clone(),
         request.name.clone(),
         &request.init_args,
-        mailbox,
-        Some(endpoint),
-        registry.clone(),
-        doc_registry.clone(),
+        crate::runtime::ParticleContext {
+            mailbox,
+            registry: registry.clone(),
+            endpoint: Some(endpoint),
+            doc_registry: doc_registry.clone(),
+            peers: Some(peers.clone()),
+        },
     )
     .await
     {
@@ -208,4 +239,38 @@ async fn handle_spawn(
             name: request.name,
         }),
     })
+}
+
+/// Drain a peer's message link, delivering each message as it arrives.
+///
+/// Messages are handled **sequentially, in arrival order** — deliberately not
+/// spawned per message, since spawning would discard the very ordering the
+/// single stream exists to provide.
+async fn handle_message_link(
+    mut recv: iroh::endpoint::RecvStream,
+    registry: Arc<ParticleRegistry>,
+) -> anyhow::Result<()> {
+    use crate::transport::{Envelope, read_frame};
+
+    while let Some(envelope) = read_frame(&mut recv).await? {
+        let (pid, ref_id, payload) = match envelope {
+            Envelope::Data { target, payload } => (target, None, payload),
+            Envelope::Tagged {
+                target,
+                ref_id,
+                payload,
+            } => (target, Some(ref_id), payload),
+        };
+
+        // Fire-and-forget: a message for a particle that has died is dropped,
+        // exactly as it would be locally.
+        let delivered = match ref_id {
+            Some(r) => registry.send_tagged_to_pid(&pid, r, payload).await,
+            None => registry.send_to_pid(&pid, payload).await,
+        };
+        if delivered.is_err() {
+            tracing::debug!(pid = %pid, "message for an unknown particle; dropped");
+        }
+    }
+    Ok(())
 }

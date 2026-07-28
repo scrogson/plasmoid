@@ -20,6 +20,7 @@ pub struct HostState {
     registry: Option<Arc<ParticleRegistry>>,
     doc_registry: Option<Arc<DocRegistry>>,
     mailbox: Option<Arc<Mailbox>>,
+    peers: Option<Arc<crate::transport::PeerLinks>>,
     next_ref: AtomicU64,
     wasi_ctx: WasiCtx,
     resource_table: ResourceTable,
@@ -55,6 +56,7 @@ impl HostState {
             registry: None,
             doc_registry: None,
             mailbox: None,
+            peers: None,
             next_ref: AtomicU64::new(1),
             wasi_ctx: WasiCtxBuilder::new().build(),
             resource_table: ResourceTable::new(),
@@ -111,6 +113,14 @@ impl HostState {
 
     pub fn mailbox(&self) -> Option<&Arc<Mailbox>> {
         self.mailbox.as_ref()
+    }
+
+    pub fn peers(&self) -> Option<&Arc<crate::transport::PeerLinks>> {
+        self.peers.as_ref()
+    }
+
+    pub fn set_peers(&mut self, peers: Option<Arc<crate::transport::PeerLinks>>) {
+        self.peers = peers;
     }
 
     pub fn set_mailbox(&mut self, mailbox: Option<Arc<Mailbox>>) {

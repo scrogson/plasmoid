@@ -36,7 +36,7 @@ fn run_orchestrator(n: u32, m: u32) -> Result<(), String> {
 
     for i in 0..n as usize {
         let next = workers[(i + 1) % workers.len()].to_string();
-        send!(&workers[i], &RingMsg::Setup(next)).map_err(|e| format!("{:?}", e))?;
+        send!(&workers[i], &RingMsg::Setup(next));
     }
 
     let t = std::time::Instant::now();
@@ -47,8 +47,7 @@ fn run_orchestrator(n: u32, m: u32) -> Result<(), String> {
             remaining: m,
             master: self_str,
         }
-    )
-    .map_err(|e| format!("{:?}", e))?;
+    );
 
     while let Some(msg) = recv!(RingMsg, None) {
         if matches!(msg, RingMsg::Finished) {
@@ -87,8 +86,7 @@ fn run_worker() -> Result<(), String> {
                 remaining: 0,
                 master,
             } => {
-                send!(&resolve(&master).ok_or("bad master")?, &RingMsg::Finished)
-                    .map_err(|e| format!("{:?}", e))?;
+                send!(&resolve(&master).ok_or("bad master")?, &RingMsg::Finished);
             }
             RingMsg::Hop { remaining, master } => {
                 send!(
@@ -97,8 +95,7 @@ fn run_worker() -> Result<(), String> {
                         remaining: remaining - 1,
                         master,
                     }
-                )
-                .map_err(|e| format!("{:?}", e))?;
+                );
             }
             _ => {}
         }

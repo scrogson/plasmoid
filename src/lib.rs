@@ -8,6 +8,7 @@ pub mod policy;
 pub mod protocol;
 pub mod registry;
 pub mod runtime;
+pub mod transport;
 pub mod wire;
 
 pub use pid::Pid;

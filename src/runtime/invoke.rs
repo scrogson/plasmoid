@@ -10,7 +10,7 @@ use crate::mailbox::{Mailbox, MailboxMessage};
 use crate::message::ExitReason;
 pub use crate::pid::Pid;
 use crate::policy::PolicySet;
-use crate::registry::{ParticleRegistry, SendError};
+use crate::registry::ParticleRegistry;
 use anyhow::{Result, anyhow};
 use iroh::Endpoint;
 use std::sync::Arc;
@@ -78,6 +78,7 @@ impl plasmoid::runtime::host::Host for HostState {
         };
         let endpoint = self.endpoint().cloned();
         let doc_registry = self.doc_registry().cloned();
+        let peers = self.peers().cloned();
 
         // Look up the component template
         let (comp, caps) = match registry.get_component(&component).await {
@@ -106,10 +107,13 @@ impl plasmoid::runtime::host::Host for HostState {
             pid_clone,
             name,
             &init_args,
-            mailbox,
-            endpoint,
-            registry_clone,
-            doc_registry,
+            ParticleContext {
+                mailbox,
+                registry: registry_clone,
+                endpoint,
+                doc_registry,
+                peers,
+            },
         )
         .await
         {
@@ -134,26 +138,19 @@ impl plasmoid::runtime::host::Host for HostState {
         Ok(())
     }
 
-    async fn send(
-        &mut self,
-        target: Resource<Pid>,
-        msg: Vec<u8>,
-    ) -> wasmtime::Result<Result<(), plasmoid::runtime::host::SendError>> {
-        let pid = match self.resource_table().get(&target) {
-            Ok(p) => p.clone(),
-            Err(_) => return Ok(Err(plasmoid::runtime::host::SendError::NoParticle)),
+    /// Deliver a message, routing by the target's home node.
+    ///
+    /// Fire-and-forget per #14: this never reports a delivery failure. A dead
+    /// target, an unreachable node or a stale resource handle all drop the
+    /// message silently, exactly as they do locally. Liveness is discovered
+    /// with `monitor`, not with `send`.
+    async fn send(&mut self, target: Resource<Pid>, msg: Vec<u8>) -> wasmtime::Result<()> {
+        let Ok(pid) = self.resource_table().get(&target).cloned() else {
+            tracing::debug!("send to a stale pid handle; dropped");
+            return Ok(());
         };
-
-        let registry = match self.registry() {
-            Some(r) => r.clone(),
-            None => return Ok(Err(plasmoid::runtime::host::SendError::NoParticle)),
-        };
-
-        let result = registry.send_to_pid(&pid, msg).await.map_err(|e| match e {
-            SendError::NoParticle => plasmoid::runtime::host::SendError::NoParticle,
-            SendError::MailboxFull => plasmoid::runtime::host::SendError::MailboxFull,
-        });
-        Ok(result)
+        self.deliver(pid, None, msg).await;
+        Ok(())
     }
 
     async fn send_ref(
@@ -161,25 +158,13 @@ impl plasmoid::runtime::host::Host for HostState {
         target: Resource<Pid>,
         ref_id: u64,
         msg: Vec<u8>,
-    ) -> wasmtime::Result<Result<(), plasmoid::runtime::host::SendError>> {
-        let pid = match self.resource_table().get(&target) {
-            Ok(p) => p.clone(),
-            Err(_) => return Ok(Err(plasmoid::runtime::host::SendError::NoParticle)),
+    ) -> wasmtime::Result<()> {
+        let Ok(pid) = self.resource_table().get(&target).cloned() else {
+            tracing::debug!("send-ref to a stale pid handle; dropped");
+            return Ok(());
         };
-
-        let registry = match self.registry() {
-            Some(r) => r.clone(),
-            None => return Ok(Err(plasmoid::runtime::host::SendError::NoParticle)),
-        };
-
-        let result = registry
-            .send_tagged_to_pid(&pid, ref_id, msg)
-            .await
-            .map_err(|e| match e {
-                SendError::NoParticle => plasmoid::runtime::host::SendError::NoParticle,
-                SendError::MailboxFull => plasmoid::runtime::host::SendError::MailboxFull,
-            });
-        Ok(result)
+        self.deliver(pid, Some(ref_id), msg).await;
+        Ok(())
     }
 
     async fn recv(
@@ -496,11 +481,26 @@ fn parse_wave_args(
     Ok(vals)
 }
 
+/// The runtime context every particle needs, threaded into its host state.
+///
+/// These travelled as loose arguments until routing added a sixth; they are one
+/// clump and are passed as one thing.
+#[derive(Clone)]
+pub struct ParticleContext {
+    pub mailbox: Arc<Mailbox>,
+    pub registry: Arc<ParticleRegistry>,
+    pub endpoint: Option<Endpoint>,
+    pub doc_registry: Option<Arc<DocRegistry>>,
+    pub peers: Option<Arc<crate::transport::PeerLinks>>,
+}
+
+impl std::fmt::Debug for ParticleContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ParticleContext").finish_non_exhaustive()
+    }
+}
+
 /// Start a particle: instantiate component, find `start` export, call it.
-// Every argument is a distinct piece of runtime context that must reach the
-// host state. Bundling them into a params struct would be the cleaner fix;
-// left as-is for now to keep this change limited to enabling the clippy gate.
-#[allow(clippy::too_many_arguments)]
 pub async fn start_particle(
     engine: &Engine,
     component: &wasmtime::component::Component,
@@ -508,18 +508,16 @@ pub async fn start_particle(
     pid: Pid,
     name: Option<String>,
     init_args: &str,
-    mailbox: Arc<Mailbox>,
-    endpoint: Option<Endpoint>,
-    registry: Arc<ParticleRegistry>,
-    doc_registry: Option<Arc<DocRegistry>>,
+    ctx: ParticleContext,
 ) -> Result<()> {
     // Create host state
     let mut state = HostState::new(pid.clone(), name, capabilities.clone());
-    state.set_endpoint(endpoint);
+    state.set_endpoint(ctx.endpoint);
     state.set_engine(Some(engine.clone()));
-    state.set_registry(Some(registry.clone()));
-    state.set_doc_registry(doc_registry);
-    state.set_mailbox(Some(mailbox));
+    state.set_registry(Some(ctx.registry.clone()));
+    state.set_doc_registry(ctx.doc_registry);
+    state.set_peers(ctx.peers);
+    state.set_mailbox(Some(ctx.mailbox));
 
     // Create store and linker
     let mut store = wasmtime::Store::new(engine, state);
@@ -556,7 +554,7 @@ pub async fn start_particle(
 
     // Spawn the start function as a background task
     let pid_for_task = pid.clone();
-    let registry_for_task = registry.clone();
+    let registry_for_task = ctx.registry.clone();
     tokio::spawn(async move {
         tracing::debug!(pid = %pid_for_task, "Calling start function");
 
@@ -651,5 +649,58 @@ fn interpret_start_result(results: &[Val]) -> ExitReason {
             Err(None) => ExitReason::Exception("start failed (no error details)".to_string()),
         },
         _ => ExitReason::Normal,
+    }
+}
+
+impl HostState {
+    /// Route a message to its target, wherever that particle lives.
+    ///
+    /// A pid carries its home node, so this needs no registry lookup: local
+    /// targets go straight to the mailbox, remote ones onto the ordered peer
+    /// link. Failures are logged and swallowed — `send` is fire-and-forget, and
+    /// a sending particle must not be able to tell the two cases apart.
+    async fn deliver(&mut self, pid: Pid, ref_id: Option<u64>, msg: Vec<u8>) {
+        let is_local = match self.endpoint() {
+            Some(ep) => pid.is_local_to(&ep.id()),
+            // No endpoint means a test harness with only a local registry.
+            None => true,
+        };
+
+        if is_local {
+            let Some(registry) = self.registry().cloned() else {
+                tracing::debug!(pid = %pid, "no registry; message dropped");
+                return;
+            };
+            let result = match ref_id {
+                Some(r) => registry.send_tagged_to_pid(&pid, r, msg).await,
+                None => registry.send_to_pid(&pid, msg).await,
+            };
+            if result.is_err() {
+                tracing::debug!(pid = %pid, "local target is gone; message dropped");
+            }
+            return;
+        }
+
+        let Some(peers) = self.peers().cloned() else {
+            tracing::debug!(pid = %pid, "no peer transport; remote message dropped");
+            return;
+        };
+        let node = pid.node;
+        let envelope = match ref_id {
+            Some(r) => crate::transport::Envelope::Tagged {
+                target: pid,
+                ref_id: r,
+                payload: msg,
+            },
+            None => crate::transport::Envelope::Data {
+                target: pid,
+                payload: msg,
+            },
+        };
+        // Enqueues and returns; the peer's writer task owns the connection, so
+        // a particle never waits on a handshake.
+        if let Err(e) = peers.send(node, &envelope) {
+            tracing::debug!(peer = %node.fmt_short(), error = %e, "remote message dropped");
+        }
     }
 }

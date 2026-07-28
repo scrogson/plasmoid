@@ -4,7 +4,7 @@ A distributed particle runtime for WebAssembly components, built on [iroh](https
 
 A **particle** is a running WASM component instance with its own mailbox, an unforgeable identity, and the ability to link to and monitor other particles — an Erlang-style concurrency model in a sandbox, with [WIT](https://component-model.bytecodealliance.org/design/wit.html) as the host/guest contract.
 
-> Working toward full cross-node distribution — see [ROADMAP.md](./ROADMAP.md) for what's built and what isn't. Today particles run and message within a single node.
+> Working toward full cross-node distribution — see [ROADMAP.md](./ROADMAP.md) for what's built and what isn't. Particles can now message across nodes; spawning, linking and monitoring are still node-local.
 
 See [CONTEXT.md](./CONTEXT.md) for the project's vocabulary.
 
@@ -52,7 +52,7 @@ plasmoid start target/wasm32-wasip1/release/greeter.wasm --spawn greeter --name 
 └─────────────────────────────────────────────┘
 ```
 
-Each particle has a bounded mailbox and receives messages sequentially — it never handles two at once, so its linear memory needs no locking. Particles can spawn other particles, and `link` / `monitor` / `trap-exit` provide the primitives OTP-style supervision is built from.
+Each particle has an unbounded mailbox and receives messages sequentially — it never handles two at once, so its linear memory needs no locking. Particles can spawn other particles, and `link` / `monitor` / `trap-exit` provide the primitives OTP-style supervision is built from.
 
 Nodes form a peer-to-peer QUIC mesh with cryptographic identity, discovered over mDNS on the local network with relay fallback.
 
@@ -178,7 +178,7 @@ plasmoid spawn <component>           Spawn a particle on a running node
 plasmoid send <target> <message>     Send a message to a particle
 ```
 
-`spawn` and `send` accept a node id, so a running node can be driven from outside — `plasmoid send <node-id> <name> <message>`. This is operator-level access; particles themselves address only their own node.
+`spawn` and `send` accept a node id, so a running node can be driven from outside — `plasmoid send <node-id> <name> <message>`.
 
 ## WIT Interface
 
@@ -199,8 +199,9 @@ interface host {
     exit:  func(reason: exit-reason);
 
     // Messaging
-    send:     func(target: borrow<pid>, msg: list<u8>) -> result<_, send-error>;
-    send-ref: func(target: borrow<pid>, ref: u64, msg: list<u8>) -> result<_, send-error>;
+    // fire-and-forget, and routed to whichever node owns the pid
+    send:     func(target: borrow<pid>, msg: list<u8>);
+    send-ref: func(target: borrow<pid>, ref: u64, msg: list<u8>);
     recv:     func(timeout-ms: option<u64>) -> option<message>;
     recv-ref: func(ref: u64, timeout-ms: option<u64>) -> option<message>;
 

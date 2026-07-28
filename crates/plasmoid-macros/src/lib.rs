@@ -209,7 +209,7 @@ fn expand_gen_server(impl_block: syn::ItemImpl) -> Result<TokenStream, syn::Erro
                 let response = state.handle_call(request);
                 let response_bytes = plasmoid_sdk::messaging::encode(&response);
                 if let Some(from) = crate::bindings::plasmoid::runtime::host::resolve(pid_str) {
-                    let _ = crate::bindings::plasmoid::runtime::host::send_ref(
+                    crate::bindings::plasmoid::runtime::host::send_ref(
                         &from,
                         tagged.ref_,
                         &response_bytes,
@@ -310,8 +310,9 @@ fn expand_gen_server(impl_block: syn::ItemImpl) -> Result<TokenStream, syn::Erro
                 payload.extend((self_pid_str.len() as u32).to_le_bytes());
                 payload.extend(self_pid_str.as_bytes());
                 payload.extend(req_bytes);
-                crate::bindings::plasmoid::runtime::host::send_ref(target, ref_id, &payload)
-                    .map_err(|_| plasmoid_sdk::CallError::SendFailed)?;
+                // send is fire-and-forget: a failed delivery surfaces as the
+                // reply never arriving, i.e. Timeout below.
+                crate::bindings::plasmoid::runtime::host::send_ref(target, ref_id, &payload);
                 match crate::bindings::plasmoid::runtime::host::recv_ref(ref_id, timeout_ms) {
                     Some(crate::bindings::plasmoid::runtime::host::Message::Tagged(tagged)) => {
                         plasmoid_sdk::messaging::decode(&tagged.payload)
@@ -331,10 +332,10 @@ fn expand_gen_server(impl_block: syn::ItemImpl) -> Result<TokenStream, syn::Erro
             pub fn cast(
                 target: &crate::bindings::plasmoid::runtime::host::Pid,
                 msg: &#cast_ty,
-            ) -> Result<(), crate::bindings::plasmoid::runtime::host::SendError> {
+            ) {
                 let mut payload = vec![0x01u8];
                 payload.extend(plasmoid_sdk::messaging::encode(msg));
-                crate::bindings::plasmoid::runtime::host::send(target, &payload)
+                crate::bindings::plasmoid::runtime::host::send(target, &payload);
             }
         }
     } else {

@@ -10,14 +10,14 @@ See [`CONTEXT.md`](./CONTEXT.md) for vocabulary — a *particle* is a running WA
 
 ## Works today
 
-**The particle model, on a single node.**
+**The particle model.**
 
 | | |
 |---|---|
 | Particles | WASM components instantiated per-spawn, with linear memory persisting across messages for the instance's lifetime |
 | Pids | `Pid { node, seq }` — a WIT resource handle, O(1) routing, invalidated on death so stale references are detectable |
-| Mailboxes | Bounded queue (default capacity 1024), sequential delivery — a particle never handles two messages at once. Overflow returns `MailboxFull` to the sender |
-| Messaging | `send` / `recv`, plus `send-ref` / `recv-ref` for tagged request-reply correlation. `recv` takes an optional timeout |
+| Mailboxes | **Unbounded**, sequential delivery — a particle never handles two messages at once. Following Erlang: `send` is fire-and-forget, so a bound could only drop silently; a slow particle instead grows until the node dies, which is loud and diagnosable |
+| Messaging | `send` / `recv`, plus `send-ref` / `recv-ref` for tagged request-reply correlation. **`send` routes to any node** and is fire-and-forget: it never blocks and never reports a delivery failure, local or remote. Messages from one particle to another arrive in send order, across nodes. Liveness is discovered with `monitor` |
 | Naming | `register` / `unregister` / `lookup` by name; `resolve` from a pid string |
 | Links & monitors | `link` / `unlink` (bidirectional, exit-propagating), `monitor` / `demonitor` (unidirectional, non-propagating), `trap-exit` to receive exit signals as ordinary messages |
 | Exit | `exit(reason)` with `normal` / `kill` / `shutdown` / `exception`; exit and down signals arrive as mailbox messages |
@@ -28,7 +28,8 @@ See [`CONTEXT.md`](./CONTEXT.md) for vocabulary — a *particle* is a running WA
 
 - Nodes form a peer-to-peer QUIC mesh over iroh, with mDNS discovery on the local network and n0 relay fallback. Node identity is an Ed25519 keypair, stable across restarts.
 - All Plasmoid traffic uses a single ALPN, `plasmoid/1`.
-- **External clients can spawn and message particles on a remote node** — `plasmoid spawn --node <id>` and `plasmoid send <node-id> <target> <msg>`. This is operator-level access, not particle-to-particle.
+- **Particles message across nodes.** A pid carries its home node, so `send` routes there with no registry lookup; each node pair shares one ordered link, drained by a writer task so sending never blocks on a handshake.
+- External clients can also spawn and message particles on a remote node — `plasmoid spawn --node <id>` and `plasmoid send <node-id> <target> <msg>`.
 - CLI: `new`, `component new`, `start`, `spawn`, `send`.
 
 **Authoring.** The `plasmoid-sdk` crate provides `#[main]` and `#[gen_server]` (which generates the receive loop, dispatch, and typed `call`/`cast` client methods), `send!` / `recv!` over postcard, logging macros, and init-argument helpers. Example components: `echo` and a `ring` benchmark.
@@ -37,7 +38,7 @@ See [`CONTEXT.md`](./CONTEXT.md) for vocabulary — a *particle* is a running WA
 
 ## Not built
 
-**Cross-node particle addressing** — the headline gap. A particle cannot spawn on, or send to, another node. `spawn` takes no node argument, and message routing resolves against a node-local table. Everything under *Works today* stops at the node boundary; distribution today is transport and tooling, not programming model.
+**Cross-node spawn** — a particle can now *message* any node, but cannot *spawn* on one: `spawn` still takes no node argument.
 
 **Supervision** — no supervisor exists, and there are no restart strategies or restart-intensity limits. The primitives a supervisor would be built from — `link`, `monitor`, `trap-exit`, exit-signal propagation — are all in place and working. Supervisors are intended to be ordinary particles rather than a runtime feature, as in OTP.
 

@@ -27,6 +27,7 @@ pub struct Runtime {
     engine: Engine,
     registry: Arc<ParticleRegistry>,
     doc_registry: Arc<DocRegistry>,
+    peers: Arc<crate::transport::PeerLinks>,
 }
 
 /// Load or generate a secret key from a data directory.
@@ -121,11 +122,14 @@ impl Runtime {
         .await?;
         doc_registry.start(&[]).await?;
 
+        let peers = Arc::new(crate::transport::PeerLinks::new(endpoint.clone()));
+
         let protocol = PlasmoidProtocol::new(
             registry.clone(),
             engine.clone(),
             endpoint.clone(),
             Some(doc_registry.clone()),
+            peers.clone(),
         );
 
         let router = Router::builder(endpoint.clone())
@@ -143,6 +147,7 @@ impl Runtime {
             engine,
             registry,
             doc_registry,
+            peers,
         })
     }
 
@@ -169,6 +174,48 @@ impl Runtime {
     /// Get a reference to the particle registry.
     pub fn registry(&self) -> &Arc<ParticleRegistry> {
         &self.registry
+    }
+
+    /// The runtime context handed to every particle this node starts.
+    pub fn particle_context(
+        &self,
+        mailbox: Arc<crate::mailbox::Mailbox>,
+    ) -> crate::runtime::ParticleContext {
+        crate::runtime::ParticleContext {
+            mailbox,
+            registry: self.registry.clone(),
+            endpoint: Some(self.endpoint.clone()),
+            doc_registry: Some(self.doc_registry.clone()),
+            peers: Some(self.peers.clone()),
+        }
+    }
+
+    /// Route a message exactly as a particle's `send` would.
+    ///
+    /// Exists so the routing decision can be tested without a WASM component,
+    /// which would prove nothing extra about where a message goes.
+    #[doc(hidden)]
+    pub async fn deliver_for_test(&self, target: Pid, ref_id: Option<u64>, msg: Vec<u8>) {
+        if target.is_local_to(&self.node_id()) {
+            let _ = match ref_id {
+                Some(r) => self.registry.send_tagged_to_pid(&target, r, msg).await,
+                None => self.registry.send_to_pid(&target, msg).await,
+            };
+            return;
+        }
+        let node = target.node;
+        let envelope = match ref_id {
+            Some(r) => crate::transport::Envelope::Tagged {
+                target,
+                ref_id: r,
+                payload: msg,
+            },
+            None => crate::transport::Envelope::Data {
+                target,
+                payload: msg,
+            },
+        };
+        let _ = self.peers.send(node, &envelope);
     }
 
     /// Get a reference to the doc registry.
@@ -251,10 +298,7 @@ impl Runtime {
             pid.clone(),
             name.map(|s| s.to_string()),
             init_args,
-            mailbox,
-            Some(self.endpoint.clone()),
-            self.registry.clone(),
-            Some(self.doc_registry.clone()),
+            self.particle_context(mailbox),
         )
         .await?;
 

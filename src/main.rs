@@ -397,7 +397,7 @@ async fn cmd_send(args: &[String]) -> Result<()> {
 // Scaffolding commands
 // ---------------------------------------------------------------------------
 
-const RUNTIME_WIT: &str = r#"package plasmoid:runtime@0.5.0;
+const RUNTIME_WIT: &str = r#"package plasmoid:runtime@0.6.0;
 
 interface host {
     resource pid {
@@ -412,8 +412,8 @@ interface host {
     spawn: func(component: string, name: option<string>, init-args: string) -> result<pid, spawn-error>;
     exit: func(reason: exit-reason);
 
-    send: func(target: borrow<pid>, msg: list<u8>) -> result<_, send-error>;
-    send-ref: func(target: borrow<pid>, ref: u64, msg: list<u8>) -> result<_, send-error>;
+    send: func(target: borrow<pid>, msg: list<u8>);
+    send-ref: func(target: borrow<pid>, ref: u64, msg: list<u8>);
 
     recv: func(timeout-ms: option<u64>) -> option<message>;
     recv-ref: func(ref: u64, timeout-ms: option<u64>) -> option<message>;
@@ -468,11 +468,6 @@ interface host {
         component-not-found,
         init-failed,
         resource-limit,
-    }
-
-    enum send-error {
-        no-particle,
-        mailbox-full,
     }
 
     enum registry-error {
@@ -702,7 +697,7 @@ bindings::export!({pascal_name} with_types_in bindings);
         r#"package {namespace}:{name}@0.1.0;
 
 world {name_underscored} {{
-    include plasmoid:runtime/particle@0.5.0;
+    include plasmoid:runtime/particle@0.6.0;
     export start: func() -> result<_, string>;
 }}
 "#
