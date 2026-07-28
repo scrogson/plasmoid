@@ -320,7 +320,7 @@ async fn handle_peer_message(
             registry.demonitor(&watcher, ref_id).await;
         }
         PeerMessage::Exit { from, to, reason } => {
-            registry.deliver_exit(&to, &from, reason).await;
+            registry.apply_exit_signal(&to, &from, reason).await;
         }
         PeerMessage::Down {
             from,

@@ -261,6 +261,29 @@ impl ParticleRegistry {
             .await;
     }
 
+    /// Apply an exit signal arriving from another node, with the same policy a
+    /// local death would get.
+    ///
+    /// Delivering it as a message unconditionally — which is what
+    /// [`Self::deliver_exit`] does — is wrong for a non-trapping particle: it
+    /// would survive a death that would have killed it had the peer been local.
+    /// That makes a remote death distinguishable from a local one, which #21
+    /// promised it would not be, and leaves supervision broken across nodes.
+    pub async fn apply_exit_signal(&self, to: &Pid, from: &Pid, reason: ExitReason) {
+        let trapping = match self.particle_states.read().await.get(to) {
+            Some(state) => state.trap_exit,
+            None => return, // already gone
+        };
+
+        if trapping {
+            self.deliver_exit(to, from, reason).await;
+        } else if reason.is_abnormal() {
+            // Cascade, exactly as a local abnormal exit does.
+            Box::pin(self.exit_particle(to, reason)).await;
+        }
+        // Normal and not trapping: no action, as locally.
+    }
+
     /// Deliver a down signal straight to a local particle's mailbox.
     pub async fn deliver_down(&self, to: &Pid, from: &Pid, ref_id: u64, reason: ExitReason) {
         let _ = self
@@ -824,6 +847,72 @@ mod tests {
         assert!(
             dead.contains(&pid_b),
             "link-propagated death should broadcast too"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_a_remote_exit_kills_a_non_trapping_particle() {
+        // A remote death must do what a local one does. Delivering it as a
+        // message instead would let a particle survive an abnormal exit that
+        // would have killed it had the peer been local — making remote and
+        // local distinguishable, which #21 says they must not be.
+        let registry = make_registry();
+        let (pid, _mb) = spawn_test_particle(&registry).await;
+        let remote = Pid {
+            node: SecretKey::generate().public(),
+            seq: 1,
+        };
+
+        registry
+            .apply_exit_signal(&pid, &remote, ExitReason::Exception("boom".into()))
+            .await;
+
+        assert!(
+            !registry.particle_exists(&pid).await,
+            "a non-trapping particle must die on an abnormal remote exit"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_a_trapping_particle_receives_a_remote_exit_instead() {
+        let registry = make_registry();
+        let (pid, mailbox) = spawn_test_particle(&registry).await;
+        registry.set_trap_exit(&pid, true).await;
+        let remote = Pid {
+            node: SecretKey::generate().public(),
+            seq: 1,
+        };
+
+        registry
+            .apply_exit_signal(&pid, &remote, ExitReason::Exception("boom".into()))
+            .await;
+
+        assert!(
+            registry.particle_exists(&pid).await,
+            "a trapping particle survives"
+        );
+        match mailbox.recv(Some(Duration::from_millis(100))).await {
+            Some(crate::mailbox::MailboxMessage::Exit { from, .. }) => assert_eq!(from, remote),
+            other => panic!("expected an exit message, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_a_normal_remote_exit_does_not_kill_a_non_trapping_particle() {
+        let registry = make_registry();
+        let (pid, _mb) = spawn_test_particle(&registry).await;
+        let remote = Pid {
+            node: SecretKey::generate().public(),
+            seq: 1,
+        };
+
+        registry
+            .apply_exit_signal(&pid, &remote, ExitReason::Normal)
+            .await;
+
+        assert!(
+            registry.particle_exists(&pid).await,
+            "a normal exit is ignored by a non-trapping particle, as locally"
         );
     }
 
