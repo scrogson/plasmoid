@@ -397,23 +397,49 @@ async fn cmd_send(args: &[String]) -> Result<()> {
 // Scaffolding commands
 // ---------------------------------------------------------------------------
 
-const RUNTIME_WIT: &str = r#"package plasmoid:runtime@0.6.0;
+const RUNTIME_WIT: &str = r#"package plasmoid:runtime@0.7.0;
 
 interface host {
     resource pid {
         to-string: func() -> string;
     }
 
+    /// A node's identity, as full hex. Never the truncated form `pid.to-string`
+    /// renders, which keeps only 4 of 32 bytes and cannot be parsed back.
+    type node-id = string;
+
+    /// Anything a message can be addressed to.
+    ///
+    /// One destination type rather than one function per address form, so a new
+    /// form costs a case here instead of a parallel set of functions. A `named`
+    /// destination is resolved on the *receiving* node — there is no lookup.
+    variant destination {
+        pid(borrow<pid>),
+        local-named(string),
+        named(tuple<node-id, string>),
+    }
+
     self-pid: func() -> pid;
     self-name: func() -> option<string>;
+    self-node: func() -> node-id;
+    node-of: func(p: borrow<pid>) -> node-id;
 
     make-ref: func() -> u64;
 
     spawn: func(component: string, name: option<string>, init-args: string) -> result<pid, spawn-error>;
+
+    /// Spawn on another node, waiting for it to allocate the pid and reply.
+    /// Blocking is acceptable here because spawn is not a hot path.
+    spawn-on: func(node: node-id, component: string, name: option<string>, init-args: string) -> result<pid, spawn-error>;
+
+    /// Spawn on another node without waiting. Returns a ref; the outcome
+    /// arrives as a `spawn-reply` message, correlated with `recv-ref`.
+    spawn-request: func(node: node-id, component: string, name: option<string>, init-args: string) -> u64;
+
     exit: func(reason: exit-reason);
 
-    send: func(target: borrow<pid>, msg: list<u8>);
-    send-ref: func(target: borrow<pid>, ref: u64, msg: list<u8>);
+    send: func(dest: destination, msg: list<u8>);
+    send-ref: func(dest: destination, ref: u64, msg: list<u8>);
 
     recv: func(timeout-ms: option<u64>) -> option<message>;
     recv-ref: func(ref: u64, timeout-ms: option<u64>) -> option<message>;
@@ -424,9 +450,11 @@ interface host {
     unregister: func(name: string) -> result<_, registry-error>;
     lookup: func(name: string) -> option<pid>;
 
-    link: func(target: borrow<pid>) -> result<_, link-error>;
-    unlink: func(target: borrow<pid>);
-    monitor: func(target: borrow<pid>) -> u64;
+    link: func(dest: destination) -> result<_, link-error>;
+    unlink: func(dest: destination);
+    /// Returns 0 if the destination cannot be monitored — an unknown particle,
+    /// or one on another node, since cross-node monitors are not implemented.
+    monitor: func(dest: destination) -> u64;
     demonitor: func(ref: u64);
     trap-exit: func(enabled: bool);
 
@@ -457,17 +485,25 @@ interface host {
         payload: list<u8>,
     }
 
+    /// The outcome of a `spawn-request`, delivered as a message.
+    record spawn-reply {
+        ref: u64,
+        outcome: result<pid, spawn-error>,
+    }
+
     variant message {
         data(list<u8>),
         tagged(tagged-message),
         exit(exit-signal),
         down(down-signal),
+        spawn-reply(spawn-reply),
     }
 
     enum spawn-error {
         component-not-found,
         init-failed,
         resource-limit,
+        node-unreachable,
     }
 
     enum registry-error {
@@ -477,6 +513,9 @@ interface host {
 
     enum link-error {
         no-particle,
+        /// The destination is on another node. Cross-node links are not
+        /// implemented yet — see issue #21/#22.
+        not-local,
     }
 }
 
@@ -697,7 +736,7 @@ bindings::export!({pascal_name} with_types_in bindings);
         r#"package {namespace}:{name}@0.1.0;
 
 world {name_underscored} {{
-    include plasmoid:runtime/particle@0.6.0;
+    include plasmoid:runtime/particle@0.7.0;
     export start: func() -> result<_, string>;
 }}
 "#

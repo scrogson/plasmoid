@@ -30,21 +30,26 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
+/// Who a message is addressed to, once it has crossed to the target node.
+///
+/// A name is carried unresolved: it is looked up in the *receiving* node's
+/// registry, which is what makes a `named` destination need no round trip.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Addressee {
+    Pid(Pid),
+    Name(String),
+}
+
 /// One particle message on the wire.
 ///
 /// Distinct from [`wire::Command`], which is the request/response protocol used
 /// by external clients. This is the fire-and-forget path: there is no reply.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Envelope {
-    Data {
-        target: Pid,
-        payload: Vec<u8>,
-    },
-    Tagged {
-        target: Pid,
-        ref_id: u64,
-        payload: Vec<u8>,
-    },
+pub struct Envelope {
+    pub target: Addressee,
+    /// Set for `send-ref`, so the receiver can correlate a reply.
+    pub ref_id: Option<u64>,
+    pub payload: Vec<u8>,
 }
 
 /// Frames are length-prefixed so many can share one stream.
@@ -208,8 +213,9 @@ mod tests {
 
     #[test]
     fn test_frame_carries_its_length() {
-        let env = Envelope::Data {
-            target: a_pid(),
+        let env = Envelope {
+            target: Addressee::Pid(a_pid()),
+            ref_id: None,
             payload: b"hello".to_vec(),
         };
         let frame = encode_frame(&env).unwrap();
@@ -227,13 +233,14 @@ mod tests {
     fn test_frames_concatenate_without_ambiguity() {
         // Many messages share one stream, so a reader must be able to split them
         // apart from the prefixes alone.
-        let a = Envelope::Data {
-            target: a_pid(),
+        let a = Envelope {
+            target: Addressee::Pid(a_pid()),
+            ref_id: None,
             payload: b"first".to_vec(),
         };
-        let b = Envelope::Tagged {
-            target: a_pid(),
-            ref_id: 7,
+        let b = Envelope {
+            target: Addressee::Name("counter".into()),
+            ref_id: Some(7),
             payload: b"second".to_vec(),
         };
 
@@ -252,8 +259,9 @@ mod tests {
 
     #[test]
     fn test_oversized_messages_are_refused_rather_than_sent() {
-        let env = Envelope::Data {
-            target: a_pid(),
+        let env = Envelope {
+            target: Addressee::Pid(a_pid()),
+            ref_id: None,
             payload: vec![0u8; MAX_FRAME_LEN as usize + 1],
         };
         assert!(

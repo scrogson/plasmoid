@@ -40,10 +40,21 @@ pub struct SpawnResult {
     pub name: Option<String>,
 }
 
+/// Why a spawn failed on the node that was asked to perform it.
+///
+/// Structured rather than a string so callers can tell a missing component from
+/// a failed init without matching on prose.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum SpawnFailureWire {
+    ComponentNotFound,
+    InitFailed,
+    ResourceLimit,
+}
+
 /// A response to a spawn request.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SpawnResponse {
-    pub result: Result<SpawnResult, String>,
+    pub result: Result<SpawnResult, SpawnFailureWire>,
 }
 
 /// Top-level command envelope sent over the wire.

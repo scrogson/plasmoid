@@ -6,11 +6,12 @@
 
 use crate::doc_registry::DocRegistry;
 use crate::host::HostState;
-use crate::mailbox::{Mailbox, MailboxMessage};
+use crate::mailbox::{Mailbox, MailboxMessage, SpawnFailure};
 use crate::message::ExitReason;
 pub use crate::pid::Pid;
 use crate::policy::PolicySet;
 use crate::registry::ParticleRegistry;
+use crate::transport::Addressee;
 use anyhow::{Result, anyhow};
 use iroh::Endpoint;
 use std::sync::Arc;
@@ -144,27 +145,76 @@ impl plasmoid::runtime::host::Host for HostState {
     /// target, an unreachable node or a stale resource handle all drop the
     /// message silently, exactly as they do locally. Liveness is discovered
     /// with `monitor`, not with `send`.
-    async fn send(&mut self, target: Resource<Pid>, msg: Vec<u8>) -> wasmtime::Result<()> {
-        let Ok(pid) = self.resource_table().get(&target).cloned() else {
-            tracing::debug!("send to a stale pid handle; dropped");
-            return Ok(());
-        };
-        self.deliver(pid, None, msg).await;
+    async fn send(
+        &mut self,
+        dest: plasmoid::runtime::host::Destination,
+        msg: Vec<u8>,
+    ) -> wasmtime::Result<()> {
+        self.deliver_to(dest, None, msg).await;
         Ok(())
     }
 
     async fn send_ref(
         &mut self,
-        target: Resource<Pid>,
+        dest: plasmoid::runtime::host::Destination,
         ref_id: u64,
         msg: Vec<u8>,
     ) -> wasmtime::Result<()> {
-        let Ok(pid) = self.resource_table().get(&target).cloned() else {
-            tracing::debug!("send-ref to a stale pid handle; dropped");
-            return Ok(());
-        };
-        self.deliver(pid, Some(ref_id), msg).await;
+        self.deliver_to(dest, Some(ref_id), msg).await;
         Ok(())
+    }
+
+    async fn self_node(&mut self) -> wasmtime::Result<String> {
+        Ok(match self.endpoint() {
+            Some(ep) => hex::encode(ep.id().as_bytes()),
+            None => String::new(),
+        })
+    }
+
+    /// The node a pid lives on. Full hex, never the truncated display form.
+    async fn node_of(&mut self, p: Resource<Pid>) -> wasmtime::Result<String> {
+        Ok(match self.resource_table().get(&p) {
+            Ok(pid) => hex::encode(pid.node.as_bytes()),
+            Err(_) => String::new(),
+        })
+    }
+
+    /// Spawn on another node, waiting for it to allocate the pid and reply.
+    async fn spawn_on(
+        &mut self,
+        node: String,
+        component: String,
+        name: Option<String>,
+        init_args: String,
+    ) -> wasmtime::Result<Result<Resource<Pid>, plasmoid::runtime::host::SpawnError>> {
+        let outcome = self.do_remote_spawn(node, component, name, init_args).await;
+        Ok(match outcome {
+            Ok(pid) => Ok(self.resource_table_mut().push(pid)?),
+            Err(e) => Err(spawn_failure_to_wit(e)),
+        })
+    }
+
+    /// Spawn on another node without waiting; the outcome arrives as a message.
+    async fn spawn_request(
+        &mut self,
+        node: String,
+        component: String,
+        name: Option<String>,
+        init_args: String,
+    ) -> wasmtime::Result<u64> {
+        let ref_id = self.next_ref();
+        let Some(mailbox) = self.mailbox().cloned() else {
+            return Ok(ref_id);
+        };
+        let ctx = self.particle_context();
+
+        // Spawned, not awaited: spawn-request returns before the target replies.
+        tokio::spawn(async move {
+            let outcome = remote_spawn(ctx, node, component, name, init_args).await;
+            mailbox.push_spawn_reply(ref_id, outcome).await;
+        });
+
+        Ok(ref_id)
     }
 
     async fn recv(
@@ -274,11 +324,22 @@ impl plasmoid::runtime::host::Host for HostState {
 
     async fn link(
         &mut self,
-        target: Resource<Pid>,
+        dest: plasmoid::runtime::host::Destination,
     ) -> wasmtime::Result<Result<(), plasmoid::runtime::host::LinkError>> {
-        let target_pid = match self.resource_table().get(&target) {
-            Ok(p) => p.clone(),
-            Err(_) => return Ok(Err(plasmoid::runtime::host::LinkError::NoParticle)),
+        // The destination type is settled (#19); what a cross-node link *means*
+        // is not (#21). Anything off-node is refused rather than half-honoured.
+        let target_pid = match self.resolve_local(&dest) {
+            LocalTarget::Here(pid) => pid,
+            LocalTarget::Elsewhere(..) => {
+                return Ok(Err(plasmoid::runtime::host::LinkError::NotLocal));
+            }
+            LocalTarget::Unknown => {
+                return Ok(Err(plasmoid::runtime::host::LinkError::NoParticle));
+            }
+        };
+        let target_pid = match self.resolve_named(target_pid).await {
+            Some(p) => p,
+            None => return Ok(Err(plasmoid::runtime::host::LinkError::NoParticle)),
         };
         let my_pid = self.pid().clone();
 
@@ -294,10 +355,12 @@ impl plasmoid::runtime::host::Host for HostState {
         Ok(result)
     }
 
-    async fn unlink(&mut self, target: Resource<Pid>) -> wasmtime::Result<()> {
-        let target_pid = match self.resource_table().get(&target) {
-            Ok(pid) => pid.clone(),
-            Err(_) => return Ok(()),
+    async fn unlink(&mut self, dest: plasmoid::runtime::host::Destination) -> wasmtime::Result<()> {
+        let LocalTarget::Here(t) = self.resolve_local(&dest) else {
+            return Ok(());
+        };
+        let Some(target_pid) = self.resolve_named(t).await else {
+            return Ok(());
         };
         let my_pid = self.pid().clone();
 
@@ -308,10 +371,17 @@ impl plasmoid::runtime::host::Host for HostState {
         Ok(())
     }
 
-    async fn monitor(&mut self, target: Resource<Pid>) -> wasmtime::Result<u64> {
-        let target_pid = match self.resource_table().get(&target) {
-            Ok(pid) => pid.clone(),
-            Err(_) => return Ok(0),
+    async fn monitor(
+        &mut self,
+        dest: plasmoid::runtime::host::Destination,
+    ) -> wasmtime::Result<u64> {
+        let LocalTarget::Here(t) = self.resolve_local(&dest) else {
+            // Erlang returns a ref and then a DOWN; we cannot yet observe a
+            // remote particle's death, so refuse rather than promise it (#21).
+            return Ok(0);
+        };
+        let Some(target_pid) = self.resolve_named(t).await else {
+            return Ok(0);
         };
         let my_pid = self.pid().clone();
 
@@ -395,6 +465,18 @@ fn mailbox_message_to_wit(
     resource_table: &mut wasmtime::component::ResourceTable,
 ) -> Result<plasmoid::runtime::host::Message> {
     match msg {
+        MailboxMessage::SpawnReply { ref_id, outcome } => {
+            let outcome = match outcome {
+                Ok(pid) => Ok(resource_table.push(pid)?),
+                Err(e) => Err(spawn_failure_to_wit(e)),
+            };
+            Ok(plasmoid::runtime::host::Message::SpawnReply(
+                plasmoid::runtime::host::SpawnReply {
+                    ref_: ref_id,
+                    outcome,
+                },
+            ))
+        }
         MailboxMessage::Data(data) => Ok(plasmoid::runtime::host::Message::Data(data)),
         MailboxMessage::Tagged { ref_id, payload } => Ok(plasmoid::runtime::host::Message::Tagged(
             plasmoid::runtime::host::TaggedMessage {
@@ -652,55 +734,232 @@ fn interpret_start_result(results: &[Val]) -> ExitReason {
     }
 }
 
-impl HostState {
-    /// Route a message to its target, wherever that particle lives.
-    ///
-    /// A pid carries its home node, so this needs no registry lookup: local
-    /// targets go straight to the mailbox, remote ones onto the ordered peer
-    /// link. Failures are logged and swallowed — `send` is fire-and-forget, and
-    /// a sending particle must not be able to tell the two cases apart.
-    async fn deliver(&mut self, pid: Pid, ref_id: Option<u64>, msg: Vec<u8>) {
-        let is_local = match self.endpoint() {
-            Some(ep) => pid.is_local_to(&ep.id()),
-            // No endpoint means a test harness with only a local registry.
-            None => true,
-        };
+/// Where a destination points, before any name has been looked up.
+enum LocalTarget {
+    /// On this node — a pid, or a name to resolve in the local registry.
+    Here(Addressed),
+    /// On another node; the name (if any) is resolved there, not here.
+    Elsewhere(iroh::EndpointId, Addressee),
+    /// A stale handle: nothing to address.
+    Unknown,
+}
 
-        if is_local {
-            let Some(registry) = self.registry().cloned() else {
-                tracing::debug!(pid = %pid, "no registry; message dropped");
-                return;
-            };
-            let result = match ref_id {
-                Some(r) => registry.send_tagged_to_pid(&pid, r, msg).await,
-                None => registry.send_to_pid(&pid, msg).await,
-            };
-            if result.is_err() {
-                tracing::debug!(pid = %pid, "local target is gone; message dropped");
-            }
-            return;
+/// A local destination, still possibly a name.
+enum Addressed {
+    Pid(Pid),
+    Name(String),
+}
+
+impl HostState {
+    /// Decide which node a destination belongs to, without resolving names.
+    fn resolve_local(&mut self, dest: &plasmoid::runtime::host::Destination) -> LocalTarget {
+        use self::plasmoid::runtime::host::Destination as D;
+        let me = self.endpoint().map(|e| e.id());
+
+        match dest {
+            D::Pid(handle) => match self.resource_table().get(handle) {
+                Ok(pid) => {
+                    let pid = pid.clone();
+                    match me {
+                        // No endpoint means a test harness with only a registry.
+                        None => LocalTarget::Here(Addressed::Pid(pid)),
+                        Some(me) if pid.is_local_to(&me) => LocalTarget::Here(Addressed::Pid(pid)),
+                        Some(_) => LocalTarget::Elsewhere(pid.node, Addressee::Pid(pid)),
+                    }
+                }
+                Err(_) => LocalTarget::Unknown,
+            },
+            D::LocalNamed(name) => LocalTarget::Here(Addressed::Name(name.clone())),
+            D::Named((node, name)) => match Self::parse_node(node) {
+                Some(n) if Some(n) == me => LocalTarget::Here(Addressed::Name(name.clone())),
+                Some(n) => LocalTarget::Elsewhere(n, Addressee::Name(name.clone())),
+                None => LocalTarget::Unknown,
+            },
         }
+    }
+
+    /// Resolve a local destination to a concrete pid.
+    async fn resolve_named(&mut self, target: Addressed) -> Option<Pid> {
+        match target {
+            Addressed::Pid(pid) => Some(pid),
+            Addressed::Name(name) => self.registry()?.get_by_name(&name).await,
+        }
+    }
+
+    fn parse_node(node: &str) -> Option<iroh::EndpointId> {
+        let bytes = hex::decode(node).ok()?;
+        let bytes: [u8; 32] = bytes.try_into().ok()?;
+        iroh::EndpointId::from_bytes(&bytes).ok()
+    }
+
+    /// Route a message to wherever its destination lives.
+    ///
+    /// A pid carries its home node and a `named` destination names one, so this
+    /// needs no registry lookup for the remote case — a remote name travels
+    /// unresolved and is looked up on arrival. Failures are logged and
+    /// swallowed: `send` is fire-and-forget, and a sending particle must not be
+    /// able to tell the cases apart.
+    async fn deliver_to(
+        &mut self,
+        dest: plasmoid::runtime::host::Destination,
+        ref_id: Option<u64>,
+        msg: Vec<u8>,
+    ) {
+        let (node, addressee) = match self.resolve_local(&dest) {
+            LocalTarget::Unknown => {
+                tracing::debug!("send to an unusable destination; dropped");
+                return;
+            }
+            LocalTarget::Here(target) => {
+                let Some(pid) = self.resolve_named(target).await else {
+                    tracing::debug!("no local particle for destination; dropped");
+                    return;
+                };
+                let Some(registry) = self.registry().cloned() else {
+                    return;
+                };
+                let result = match ref_id {
+                    Some(r) => registry.send_tagged_to_pid(&pid, r, msg).await,
+                    None => registry.send_to_pid(&pid, msg).await,
+                };
+                if result.is_err() {
+                    tracing::debug!(pid = %pid, "local target is gone; message dropped");
+                }
+                return;
+            }
+            LocalTarget::Elsewhere(node, addressee) => (node, addressee),
+        };
 
         let Some(peers) = self.peers().cloned() else {
-            tracing::debug!(pid = %pid, "no peer transport; remote message dropped");
+            tracing::debug!("no peer transport; remote message dropped");
             return;
         };
-        let node = pid.node;
-        let envelope = match ref_id {
-            Some(r) => crate::transport::Envelope::Tagged {
-                target: pid,
-                ref_id: r,
-                payload: msg,
-            },
-            None => crate::transport::Envelope::Data {
-                target: pid,
-                payload: msg,
-            },
+        let envelope = crate::transport::Envelope {
+            target: addressee,
+            ref_id,
+            payload: msg,
         };
         // Enqueues and returns; the peer's writer task owns the connection, so
         // a particle never waits on a handshake.
         if let Err(e) = peers.send(node, &envelope) {
             tracing::debug!(peer = %node.fmt_short(), error = %e, "remote message dropped");
         }
+    }
+}
+
+fn spawn_failure_to_wit(e: SpawnFailure) -> plasmoid::runtime::host::SpawnError {
+    match e {
+        SpawnFailure::ComponentNotFound => plasmoid::runtime::host::SpawnError::ComponentNotFound,
+        SpawnFailure::InitFailed => plasmoid::runtime::host::SpawnError::InitFailed,
+        SpawnFailure::ResourceLimit => plasmoid::runtime::host::SpawnError::ResourceLimit,
+        SpawnFailure::NodeUnreachable => plasmoid::runtime::host::SpawnError::NodeUnreachable,
+    }
+}
+
+impl HostState {
+    async fn do_remote_spawn(
+        &mut self,
+        node: String,
+        component: String,
+        name: Option<String>,
+        init_args: String,
+    ) -> Result<Pid, SpawnFailure> {
+        remote_spawn(self.particle_context(), node, component, name, init_args).await
+    }
+
+    /// Rebuild the context this particle was started with, for spawning.
+    fn particle_context(&self) -> Option<crate::runtime::ParticleContext> {
+        Some(crate::runtime::ParticleContext {
+            mailbox: self.mailbox().cloned()?,
+            registry: self.registry().cloned()?,
+            endpoint: self.endpoint().cloned(),
+            doc_registry: self.doc_registry().cloned(),
+            peers: self.peers().cloned(),
+        })
+    }
+}
+
+/// Ask another node to spawn a particle, and wait for the pid it allocates.
+///
+/// A remote pid must come from the target: `seq` is allocated by that node's
+/// generator, so the caller cannot mint one. This is why `spawn-on` costs a
+/// round trip while `send` does not — and why it is affordable, since spawn is
+/// not a hot path.
+pub(crate) async fn remote_spawn(
+    ctx: Option<crate::runtime::ParticleContext>,
+    node: String,
+    component: String,
+    name: Option<String>,
+    init_args: String,
+) -> Result<Pid, SpawnFailure> {
+    let Some(ctx) = ctx else {
+        return Err(SpawnFailure::NodeUnreachable);
+    };
+    let Some(endpoint) = ctx.endpoint.clone() else {
+        return Err(SpawnFailure::NodeUnreachable);
+    };
+    let Some(node_id) = HostState::parse_node(&node) else {
+        return Err(SpawnFailure::NodeUnreachable);
+    };
+
+    // Erlang's spawn/4 accepts your own node, and iroh refuses to connect to
+    // itself — so the local case must be handled here rather than dialled.
+    if node_id == endpoint.id() {
+        return local_spawn(ctx, &component, name.as_deref(), &init_args).await;
+    }
+
+    let client = crate::client::NodeClient::new(endpoint, node_id);
+    match client
+        .try_spawn(&component, name.as_deref(), &init_args)
+        .await
+    {
+        // The target answered, and refused.
+        Ok(Err(e)) => Err(match e {
+            crate::wire::SpawnFailureWire::ComponentNotFound => SpawnFailure::ComponentNotFound,
+            crate::wire::SpawnFailureWire::InitFailed => SpawnFailure::InitFailed,
+            crate::wire::SpawnFailureWire::ResourceLimit => SpawnFailure::ResourceLimit,
+        }),
+        Ok(Ok(result)) => Ok(result.pid),
+        // We never reached the target at all.
+        Err(e) => {
+            tracing::debug!(peer = %node_id.fmt_short(), error = %e, "Remote spawn could not reach the node");
+            Err(SpawnFailure::NodeUnreachable)
+        }
+    }
+}
+
+/// Spawn on this node, used when `spawn-on` names our own node.
+async fn local_spawn(
+    ctx: crate::runtime::ParticleContext,
+    component: &str,
+    name: Option<&str>,
+    init_args: &str,
+) -> Result<Pid, SpawnFailure> {
+    let Some((comp, caps)) = ctx.registry.get_component(component).await else {
+        return Err(SpawnFailure::ComponentNotFound);
+    };
+    let Ok((pid, mailbox)) = ctx
+        .registry
+        .spawn(component, name, Some(caps.clone()))
+        .await
+    else {
+        return Err(SpawnFailure::ResourceLimit);
+    };
+
+    let engine = ctx.registry.engine().clone();
+    let started = start_particle(
+        &engine,
+        &comp,
+        &caps,
+        pid.clone(),
+        name.map(|s| s.to_string()),
+        init_args,
+        crate::runtime::ParticleContext { mailbox, ..ctx },
+    )
+    .await;
+
+    match started {
+        Ok(()) => Ok(pid),
+        Err(_) => Err(SpawnFailure::InitFailed),
     }
 }

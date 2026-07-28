@@ -178,7 +178,7 @@ async fn handle_spawn(
         Some(result) => result,
         None => {
             return CommandResponse::Spawn(SpawnResponse {
-                result: Err(format!("component '{}' not registered", request.component)),
+                result: Err(crate::wire::SpawnFailureWire::ComponentNotFound),
             });
         }
     };
@@ -194,8 +194,9 @@ async fn handle_spawn(
     {
         Ok(result) => result,
         Err(e) => {
+            tracing::debug!(error = %e, "Remote spawn refused");
             return CommandResponse::Spawn(SpawnResponse {
-                result: Err(e.to_string()),
+                result: Err(crate::wire::SpawnFailureWire::ResourceLimit),
             });
         }
     };
@@ -218,8 +219,9 @@ async fn handle_spawn(
     )
     .await
     {
+        tracing::debug!(error = %e, "Remote particle failed to start");
         return CommandResponse::Spawn(SpawnResponse {
-            result: Err(format!("failed to start particle: {}", e)),
+            result: Err(crate::wire::SpawnFailureWire::InitFailed),
         });
     }
 
@@ -250,23 +252,25 @@ async fn handle_message_link(
     mut recv: iroh::endpoint::RecvStream,
     registry: Arc<ParticleRegistry>,
 ) -> anyhow::Result<()> {
-    use crate::transport::{Envelope, read_frame};
+    use crate::transport::{Addressee, read_frame};
 
     while let Some(envelope) = read_frame(&mut recv).await? {
-        let (pid, ref_id, payload) = match envelope {
-            Envelope::Data { target, payload } => (target, None, payload),
-            Envelope::Tagged {
-                target,
-                ref_id,
-                payload,
-            } => (target, Some(ref_id), payload),
+        // A name is resolved here, on the receiving node — that is what lets a
+        // named destination cost no round trip on the sending side.
+        let pid = match &envelope.target {
+            Addressee::Pid(p) => Some(p.clone()),
+            Addressee::Name(name) => registry.get_by_name(name).await,
+        };
+        let Some(pid) = pid else {
+            tracing::debug!(target = ?envelope.target, "no particle for destination; dropped");
+            continue;
         };
 
         // Fire-and-forget: a message for a particle that has died is dropped,
         // exactly as it would be locally.
-        let delivered = match ref_id {
-            Some(r) => registry.send_tagged_to_pid(&pid, r, payload).await,
-            None => registry.send_to_pid(&pid, payload).await,
+        let delivered = match envelope.ref_id {
+            Some(r) => registry.send_tagged_to_pid(&pid, r, envelope.payload).await,
+            None => registry.send_to_pid(&pid, envelope.payload).await,
         };
         if delivered.is_err() {
             tracing::debug!(pid = %pid, "message for an unknown particle; dropped");

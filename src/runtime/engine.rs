@@ -204,18 +204,38 @@ impl Runtime {
             return;
         }
         let node = target.node;
-        let envelope = match ref_id {
-            Some(r) => crate::transport::Envelope::Tagged {
-                target,
-                ref_id: r,
-                payload: msg,
-            },
-            None => crate::transport::Envelope::Data {
-                target,
-                payload: msg,
-            },
+        let envelope = crate::transport::Envelope {
+            target: crate::transport::Addressee::Pid(target),
+            ref_id,
+            payload: msg,
         };
         let _ = self.peers.send(node, &envelope);
+    }
+
+    /// Spawn on another node exactly as a particle's `spawn-on` would.
+    ///
+    /// Exists so remote spawn can be tested without a WASM component driving it.
+    /// Spawn on a node exactly as a particle's `spawn-on` would.
+    ///
+    /// Goes through the same `remote_spawn` the host function calls, so the
+    /// error classification and the self-node path are genuinely exercised —
+    /// an earlier version dialled `NodeClient` directly and tested none of it.
+    #[doc(hidden)]
+    pub async fn spawn_on_for_test(
+        &self,
+        node: iroh::EndpointId,
+        component: &str,
+        name: Option<&str>,
+        init_args: &str,
+    ) -> Result<Pid, crate::mailbox::SpawnFailure> {
+        crate::runtime::remote_spawn(
+            Some(self.particle_context(Arc::new(crate::mailbox::Mailbox::new()))),
+            hex::encode(node.as_bytes()),
+            component.to_string(),
+            name.map(|s| s.to_string()),
+            init_args.to_string(),
+        )
+        .await
     }
 
     /// Get a reference to the doc registry.

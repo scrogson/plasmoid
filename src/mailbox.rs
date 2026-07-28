@@ -20,6 +20,20 @@ pub enum MailboxMessage {
         ref_id: u64,
         reason: ExitReason,
     },
+    /// The outcome of a `spawn-request`, correlated by `ref_id`.
+    SpawnReply {
+        ref_id: u64,
+        outcome: Result<Pid, SpawnFailure>,
+    },
+}
+
+/// Why a spawn did not produce a particle. Mirrors the WIT `spawn-error`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpawnFailure {
+    ComponentNotFound,
+    InitFailed,
+    ResourceLimit,
+    NodeUnreachable,
 }
 
 #[derive(Debug)]
@@ -97,6 +111,23 @@ impl Mailbox {
     }
 
     /// Push a system message (Exit/Down). Unbounded, inserted at front.
+    /// Deliver a spawn reply, appended in arrival order like a data message.
+    ///
+    /// Unlike exit and down signals it is not urgent, and unlike them it is not
+    /// pushed to the front: a particle awaiting one uses `recv_ref`, which scans
+    /// the queue regardless of position.
+    pub async fn push_spawn_reply(&self, ref_id: u64, outcome: Result<Pid, SpawnFailure>) {
+        let mut inner = self.inner.lock().await;
+        if inner.closed {
+            return;
+        }
+        inner
+            .queue
+            .push_back(MailboxMessage::SpawnReply { ref_id, outcome });
+        drop(inner);
+        self.notify.notify_one();
+    }
+
     pub async fn push_system(&self, msg: SystemMessage) {
         let mailbox_msg = match msg {
             SystemMessage::Exit { from, reason } => MailboxMessage::Exit { from, reason },
@@ -159,6 +190,7 @@ impl Mailbox {
                 if let Some(pos) = inner.queue.iter().position(|msg| match msg {
                     MailboxMessage::Tagged { ref_id: r, .. } => *r == ref_id,
                     MailboxMessage::Down { ref_id: r, .. } => *r == ref_id,
+                    MailboxMessage::SpawnReply { ref_id: r, .. } => *r == ref_id,
                     _ => false,
                 }) {
                     let msg = inner.queue.remove(pos).unwrap();

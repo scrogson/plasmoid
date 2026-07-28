@@ -4,7 +4,7 @@ A distributed particle runtime for WebAssembly components, built on [iroh](https
 
 A **particle** is a running WASM component instance with its own mailbox, an unforgeable identity, and the ability to link to and monitor other particles — an Erlang-style concurrency model in a sandbox, with [WIT](https://component-model.bytecodealliance.org/design/wit.html) as the host/guest contract.
 
-> Working toward full cross-node distribution — see [ROADMAP.md](./ROADMAP.md) for what's built and what isn't. Particles can now message across nodes; spawning, linking and monitoring are still node-local.
+> Working toward full cross-node distribution — see [ROADMAP.md](./ROADMAP.md) for what's built and what isn't. Particles can message and spawn across nodes; linking and monitoring are still node-local.
 
 See [CONTEXT.md](./CONTEXT.md) for the project's vocabulary.
 
@@ -193,15 +193,31 @@ interface host {
     self-name: func() -> option<string>;
     make-ref:  func() -> u64;
 
+    // Identity of nodes
+    type node-id = string;                 // full hex
+    self-node: func() -> node-id;
+    node-of:   func(p: borrow<pid>) -> node-id;
+
+    // Anything a message can be addressed to
+    variant destination {
+        pid(borrow<pid>),
+        local-named(string),
+        named(tuple<node-id, string>),     // resolved on the receiving node
+    }
+
     // Lifecycle
-    spawn: func(component: string, name: option<string>, init-args: string)
+    spawn:    func(component: string, name: option<string>, init-args: string)
         -> result<pid, spawn-error>;
+    spawn-on: func(node: node-id, component: string, name: option<string>, init-args: string)
+        -> result<pid, spawn-error>;       // waits for the target's reply
+    spawn-request: func(node: node-id, component: string, name: option<string>, init-args: string)
+        -> u64;                            // returns immediately; reply is a message
     exit:  func(reason: exit-reason);
 
     // Messaging
-    // fire-and-forget, and routed to whichever node owns the pid
-    send:     func(target: borrow<pid>, msg: list<u8>);
-    send-ref: func(target: borrow<pid>, ref: u64, msg: list<u8>);
+    // fire-and-forget, routed to wherever the destination lives
+    send:     func(dest: destination, msg: list<u8>);
+    send-ref: func(dest: destination, ref: u64, msg: list<u8>);
     recv:     func(timeout-ms: option<u64>) -> option<message>;
     recv-ref: func(ref: u64, timeout-ms: option<u64>) -> option<message>;
 
@@ -212,9 +228,9 @@ interface host {
     resolve:    func(pid-string: string) -> option<pid>;
 
     // Failure
-    link:      func(target: borrow<pid>) -> result<_, link-error>;
-    unlink:    func(target: borrow<pid>);
-    monitor:   func(target: borrow<pid>) -> u64;
+    link:      func(dest: destination) -> result<_, link-error>;
+    unlink:    func(dest: destination);
+    monitor:   func(dest: destination) -> u64;
     demonitor: func(ref: u64);
     trap-exit: func(enabled: bool);
 

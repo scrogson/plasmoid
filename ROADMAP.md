@@ -17,9 +17,9 @@ See [`CONTEXT.md`](./CONTEXT.md) for vocabulary — a *particle* is a running WA
 | Particles | WASM components instantiated per-spawn, with linear memory persisting across messages for the instance's lifetime |
 | Pids | `Pid { node, seq }` — a WIT resource handle, O(1) routing, invalidated on death so stale references are detectable |
 | Mailboxes | **Unbounded**, sequential delivery — a particle never handles two messages at once. Following Erlang: `send` is fire-and-forget, so a bound could only drop silently; a slow particle instead grows until the node dies, which is loud and diagnosable |
-| Messaging | `send` / `recv`, plus `send-ref` / `recv-ref` for tagged request-reply correlation. **`send` routes to any node** and is fire-and-forget: it never blocks and never reports a delivery failure, local or remote. Messages from one particle to another arrive in send order, across nodes. Liveness is discovered with `monitor` |
-| Naming | `register` / `unregister` / `lookup` by name; `resolve` from a pid string |
-| Links & monitors | `link` / `unlink` (bidirectional, exit-propagating), `monitor` / `demonitor` (unidirectional, non-propagating), `trap-exit` to receive exit signals as ordinary messages |
+| Messaging | `send` / `recv`, plus `send-ref` / `recv-ref` for tagged request-reply correlation. `send` takes a **destination** — a pid, a local name, or a name on another node — and **routes to any node** and is fire-and-forget: it never blocks and never reports a delivery failure, local or remote. Messages from one particle to another arrive in send order, across nodes. Liveness is discovered with `monitor` |
+| Naming | `register` / `unregister` / `lookup` by name, node-scoped as in Erlang; `resolve` from a pid string. A name on another node is addressed as a `named(node, name)` **destination**, resolved on the receiving node — there is no remote lookup |
+| Links & monitors | `link` / `unlink` (bidirectional, exit-propagating), `monitor` / `demonitor` (unidirectional, non-propagating), `trap-exit` to receive exit signals as ordinary messages. They take a destination like `send`, but **node-local only**: a remote destination is refused with `not-local`, and `monitor` returns 0 |
 | Exit | `exit(reason)` with `normal` / `kill` / `shutdown` / `exception`; exit and down signals arrive as mailbox messages |
 | Execution | Async invocation via wasmtime fibers; host functions are natively async |
 | WASI | `wasm32-wasip1` components supported via `wasmtime-wasi` |
@@ -28,6 +28,7 @@ See [`CONTEXT.md`](./CONTEXT.md) for vocabulary — a *particle* is a running WA
 
 - Nodes form a peer-to-peer QUIC mesh over iroh, with mDNS discovery on the local network and n0 relay fallback. Node identity is an Ed25519 keypair, stable across restarts.
 - All Plasmoid traffic uses a single ALPN, `plasmoid/1`.
+- **Particles spawn on other nodes** — `spawn-on` waits for the target to allocate the pid (a remote pid must come from the target, since `seq` is node-allocated); `spawn-request` returns immediately and delivers the outcome as a `spawn-reply` message. Blocking is acceptable for spawn because it is not a hot path.
 - **Particles message across nodes.** A pid carries its home node, so `send` routes there with no registry lookup; each node pair shares one ordered link, drained by a writer task so sending never blocks on a handshake.
 - External clients can also spawn and message particles on a remote node — `plasmoid spawn --node <id>` and `plasmoid send <node-id> <target> <msg>`.
 - CLI: `new`, `component new`, `start`, `spawn`, `send`.
@@ -37,8 +38,6 @@ See [`CONTEXT.md`](./CONTEXT.md) for vocabulary — a *particle* is a running WA
 ---
 
 ## Not built
-
-**Cross-node spawn** — a particle can now *message* any node, but cannot *spawn* on one: `spawn` still takes no node argument.
 
 **Supervision** — no supervisor exists, and there are no restart strategies or restart-intensity limits. The primitives a supervisor would be built from — `link`, `monitor`, `trap-exit`, exit-signal propagation — are all in place and working. Supervisors are intended to be ordinary particles rather than a runtime feature, as in OTP.
 

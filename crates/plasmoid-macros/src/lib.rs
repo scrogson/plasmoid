@@ -210,7 +210,7 @@ fn expand_gen_server(impl_block: syn::ItemImpl) -> Result<TokenStream, syn::Erro
                 let response_bytes = plasmoid_sdk::messaging::encode(&response);
                 if let Some(from) = crate::bindings::plasmoid::runtime::host::resolve(pid_str) {
                     crate::bindings::plasmoid::runtime::host::send_ref(
-                        &from,
+                        &crate::bindings::plasmoid::runtime::host::Destination::Pid(&from),
                         tagged.ref_,
                         &response_bytes,
                     );
@@ -312,7 +312,11 @@ fn expand_gen_server(impl_block: syn::ItemImpl) -> Result<TokenStream, syn::Erro
                 payload.extend(req_bytes);
                 // send is fire-and-forget: a failed delivery surfaces as the
                 // reply never arriving, i.e. Timeout below.
-                crate::bindings::plasmoid::runtime::host::send_ref(target, ref_id, &payload);
+                crate::bindings::plasmoid::runtime::host::send_ref(
+                    &crate::bindings::plasmoid::runtime::host::Destination::Pid(target),
+                    ref_id,
+                    &payload,
+                );
                 match crate::bindings::plasmoid::runtime::host::recv_ref(ref_id, timeout_ms) {
                     Some(crate::bindings::plasmoid::runtime::host::Message::Tagged(tagged)) => {
                         plasmoid_sdk::messaging::decode(&tagged.payload)
@@ -335,7 +339,10 @@ fn expand_gen_server(impl_block: syn::ItemImpl) -> Result<TokenStream, syn::Erro
             ) {
                 let mut payload = vec![0x01u8];
                 payload.extend(plasmoid_sdk::messaging::encode(msg));
-                crate::bindings::plasmoid::runtime::host::send(target, &payload);
+                crate::bindings::plasmoid::runtime::host::send(
+                    &crate::bindings::plasmoid::runtime::host::Destination::Pid(target),
+                    &payload,
+                );
             }
         }
     } else {

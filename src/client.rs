@@ -19,6 +19,29 @@ impl NodeClient {
     }
 
     /// Spawn a particle on the remote node from a registered component.
+    /// Spawn on the target node, keeping *why* a spawn failed intact.
+    ///
+    /// The outer `Result` is transport failure — the target could not be
+    /// reached. The inner one is the target's own refusal. Collapsing the two
+    /// would make `node-unreachable` indistinguishable from `init-failed`.
+    pub async fn try_spawn(
+        &self,
+        component: &str,
+        name: Option<&str>,
+        init_args: &str,
+    ) -> Result<Result<SpawnResult, crate::wire::SpawnFailureWire>> {
+        let command = Command::Spawn(SpawnRequest {
+            component: component.to_string(),
+            name: name.map(|s| s.to_string()),
+            init_args: init_args.to_string(),
+        });
+
+        match self.send_command(&command).await? {
+            CommandResponse::Spawn(r) => Ok(r.result),
+            other => anyhow::bail!("unexpected response type: expected Spawn, got {:?}", other),
+        }
+    }
+
     pub async fn spawn(
         &self,
         component: &str,
@@ -36,7 +59,7 @@ impl NodeClient {
         match response {
             CommandResponse::Spawn(spawn_response) => spawn_response
                 .result
-                .map_err(|e| anyhow::anyhow!("spawn failed: {}", e)),
+                .map_err(|e| anyhow::anyhow!("spawn refused by target: {:?}", e)),
             other => anyhow::bail!("unexpected response type: expected Spawn, got {:?}", other),
         }
     }

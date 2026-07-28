@@ -16,11 +16,29 @@ pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
     postcard::from_bytes(bytes).map_err(|e| format!("decode error: {e}"))
 }
 
+/// Send a typed message.
+///
+/// `send!(pid, &msg)` addresses a particle directly. `send!(node, "name", &msg)`
+/// addresses a name registered on another node, resolved there — no lookup and
+/// no round trip.
 #[macro_export]
 macro_rules! send {
     ($target:expr, $msg:expr) => {{
         let encoded = $crate::messaging::encode($msg);
-        crate::bindings::plasmoid::runtime::host::send($target, &encoded)
+        crate::bindings::plasmoid::runtime::host::send(
+            &crate::bindings::plasmoid::runtime::host::Destination::Pid($target),
+            &encoded,
+        )
+    }};
+    ($node:expr, $name:expr, $msg:expr) => {{
+        let encoded = $crate::messaging::encode($msg);
+        crate::bindings::plasmoid::runtime::host::send(
+            &crate::bindings::plasmoid::runtime::host::Destination::Named((
+                $node.into(),
+                $name.into(),
+            )),
+            &encoded,
+        )
     }};
 }
 
