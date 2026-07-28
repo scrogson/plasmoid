@@ -720,6 +720,7 @@ impl bindings::Guest for {pascal_name} {{
                 }}
                 Some(host::Message::Exit(_)) | Some(host::Message::Down(_)) => {{}}
                 Some(host::Message::Tagged(_)) => {{}}
+                Some(host::Message::SpawnReply(_)) => {{}}
                 None => return Ok(()),
             }}
         }}
