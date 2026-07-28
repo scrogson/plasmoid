@@ -343,6 +343,19 @@ impl Runtime {
         self.registry.get_by_name(name).await.is_some()
     }
 
+    /// Shut this node down.
+    ///
+    /// Dropping a `Runtime` does **not** do this: the endpoint is cloned into
+    /// the router, the peer links and their writer tasks, so it outlives the
+    /// struct and the node keeps answering. Closing it explicitly also lets
+    /// peers learn of the departure from the connection close immediately,
+    /// rather than waiting out the idle timeout.
+    pub async fn shutdown(&self) -> Result<()> {
+        self.router.shutdown().await?;
+        self.endpoint.close().await;
+        Ok(())
+    }
+
     /// Wait for shutdown (ctrl+c). The Router handles accept in the background.
     pub async fn run(&self) -> Result<()> {
         tracing::info!(node_id = %self.node_id(), "Runtime running");
@@ -350,8 +363,7 @@ impl Runtime {
         wait_for_shutdown_signal().await?;
         tracing::info!("Shutting down");
 
-        self.router.shutdown().await?;
-        Ok(())
+        self.shutdown().await
     }
 }
 

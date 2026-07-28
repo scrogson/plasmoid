@@ -73,7 +73,12 @@ async fn test_a_lost_node_leaves_the_cluster() {
     .await;
     assert!(joined, "B should have joined A's cluster");
 
+    // Shut the node down rather than dropping it: the endpoint is cloned into
+    // the router and the peer writer tasks, so a dropped Runtime keeps
+    // answering. Closing also tells A immediately, instead of making it wait
+    // out the idle timeout.
     let b_id = b.node_id();
+    b.shutdown().await.unwrap();
     drop(b);
 
     let left = eventually("A to notice B has gone", || async {

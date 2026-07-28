@@ -192,7 +192,10 @@ async fn test_losing_a_node_fires_every_relationship_with_noconnection() {
         .unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    drop(b); // node gone
+    // Shut down rather than drop: a dropped Runtime keeps answering, because
+    // the endpoint is cloned into the router and the peer writer tasks.
+    b.shutdown().await.unwrap();
+    drop(b);
 
     // Each relationship fires individually, so a lost node looks like separate
     // deaths rather than one node-level event.
