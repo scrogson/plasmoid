@@ -59,7 +59,6 @@ Present in the source, compiling, partly tested — and unreachable. Listed beca
 |---|---|
 | `Database` (`src/host/database.rs`) | A working key-value store with unit tests, but no corresponding WIT interface. No particle can call it. |
 | `PolicySet` (`src/policy.rs`) | Threaded through six modules; its `allows()` is never called. The `cedar-policy` dependency is used in no source file. |
-| Distributed registry reads (`src/doc_registry.rs`) | The document now tracks lifecycle correctly — spawns are announced, deaths and shutdown retract them, and peers evict on tombstones — but `resolve_name` and `resolve_pid` still have no callers outside tests. Nothing routes on it yet. |
 
 ---
 
