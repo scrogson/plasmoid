@@ -33,12 +33,23 @@ async fn place(node: &Runtime, mailbox: Arc<Mailbox>) -> Pid {
     node.registry().insert_test_particle(mailbox).await
 }
 
+/// A particle that observes link deaths as messages rather than dying of them.
+///
+/// Trapping is required for this: a non-trapping particle dies on an abnormal
+/// exit, remote or local. Erlang is the same, and a supervisor is exactly the
+/// particle that traps.
+async fn place_trapping(node: &Runtime, mailbox: Arc<Mailbox>) -> Pid {
+    let pid = node.registry().insert_test_particle(mailbox).await;
+    node.registry().set_trap_exit(&pid, true).await;
+    pid
+}
+
 #[tokio::test]
 async fn test_linking_to_a_missing_remote_particle_yields_noproc() {
     let (a, b) = two_nodes().await;
 
     let inbox = Arc::new(Mailbox::new());
-    let watcher = place(&a, inbox.clone()).await;
+    let watcher = place_trapping(&a, inbox.clone()).await;
 
     // Link to a name that is not registered on B. Per #21 this is not an error
     // return -- it arrives as an exit signal, through the same channel the
@@ -102,7 +113,7 @@ async fn test_a_remote_death_reaches_a_linked_particle() {
     let (a, b) = two_nodes().await;
 
     let inbox = Arc::new(Mailbox::new());
-    let watcher = place(&a, inbox.clone()).await;
+    let watcher = place_trapping(&a, inbox.clone()).await;
     let target = place(&b, Arc::new(Mailbox::new())).await;
 
     // Link A's particle to B's, recording both halves as the runtime would.
@@ -158,7 +169,7 @@ async fn test_losing_a_node_fires_every_relationship_with_noconnection() {
     let (a, b) = two_impatient_nodes().await;
 
     let inbox = Arc::new(Mailbox::new());
-    let watcher = place(&a, inbox.clone()).await;
+    let watcher = place_trapping(&a, inbox.clone()).await;
 
     // Two links and a monitor, all crossing to B.
     let t1 = place(&b, Arc::new(Mailbox::new())).await;
@@ -202,4 +213,31 @@ async fn test_losing_a_node_fires_every_relationship_with_noconnection() {
     }
     assert_eq!(exits, 2, "both links should fire");
     assert_eq!(downs, 1, "the monitor should fire too");
+}
+
+#[tokio::test]
+async fn test_a_non_trapping_particle_dies_of_a_remote_link_death() {
+    // The counterpart to the tests above, and the behaviour they were quietly
+    // asserting the opposite of before this was fixed: a particle that does not
+    // trap exits dies of an abnormal death across a node boundary, exactly as
+    // it would locally.
+    let (a, b) = two_nodes().await;
+
+    let victim = place(&a, Arc::new(Mailbox::new())).await; // not trapping
+    let target = place(&b, Arc::new(Mailbox::new())).await;
+    a.registry().link_remote(&victim, target.clone()).await;
+    b.registry().link_remote(&target, victim.clone()).await;
+
+    b.registry()
+        .exit_particle(&target, ExitReason::Exception("boom".into()))
+        .await;
+
+    // Give the signal time to cross.
+    for _ in 0..60 {
+        if !a.registry().particle_exists(&victim).await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    panic!("a non-trapping particle must die of a remote abnormal exit");
 }
