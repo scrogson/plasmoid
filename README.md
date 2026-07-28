@@ -249,7 +249,9 @@ interface host {
 │   ├── runtime/               # WASM engine, particle lifecycle, invocation
 │   ├── host/                  # Host function implementations
 │   ├── registry.rs            # Particle registry (pids, names, links, monitors)
-│   ├── doc_registry.rs        # Replicated cross-node registry (iroh-docs)
+│   ├── cluster.rs             # Cluster membership (the connected set)
+│   ├── transport.rs           # Ordered peer links
+│   ├── signals.rs             # Cross-node exit and down propagation
 │   ├── mailbox.rs             # Per-particle message queue
 │   ├── pid.rs                 # Particle identifiers
 │   ├── protocol.rs            # ALPN handler for remote spawn/send
