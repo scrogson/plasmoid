@@ -4,7 +4,7 @@ use plasmoid::Runtime;
 use plasmoid::mailbox::{Mailbox, MailboxMessage, SpawnFailure};
 use plasmoid::pid::Pid;
 use plasmoid::policy::PolicySet;
-use plasmoid::transport::{Addressee, Envelope, PeerLinks};
+use plasmoid::transport::{Addressee, Envelope, PeerLinks, PeerMessage};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -31,11 +31,11 @@ async fn test_a_named_destination_is_resolved_on_the_receiving_node() {
     peers
         .send(
             b.node_id(),
-            &Envelope {
+            &PeerMessage::Deliver(Envelope {
                 target: Addressee::Name("counter".to_string()),
                 ref_id: None,
                 payload: b"by name".to_vec(),
-            },
+            }),
         )
         .unwrap();
 
@@ -53,11 +53,11 @@ async fn test_an_unregistered_name_is_dropped_not_errored() {
     peers
         .send(
             b.node_id(),
-            &Envelope {
+            &PeerMessage::Deliver(Envelope {
                 target: Addressee::Name("nobody-here".to_string()),
                 ref_id: None,
                 payload: b"into the void".to_vec(),
-            },
+            }),
         )
         .expect("send must not report a delivery failure");
 
@@ -68,11 +68,11 @@ async fn test_an_unregistered_name_is_dropped_not_errored() {
     peers
         .send(
             b.node_id(),
-            &Envelope {
+            &PeerMessage::Deliver(Envelope {
                 target: Addressee::Name("somebody".to_string()),
                 ref_id: None,
                 payload: b"still works".to_vec(),
-            },
+            }),
         )
         .unwrap();
 

@@ -4,7 +4,7 @@ A distributed particle runtime for WebAssembly components, built on [iroh](https
 
 A **particle** is a running WASM component instance with its own mailbox, an unforgeable identity, and the ability to link to and monitor other particles — an Erlang-style concurrency model in a sandbox, with [WIT](https://component-model.bytecodealliance.org/design/wit.html) as the host/guest contract.
 
-> Working toward full cross-node distribution — see [ROADMAP.md](./ROADMAP.md) for what's built and what isn't. Particles can message and spawn across nodes; linking and monitoring are still node-local.
+> Particles message, spawn, link and monitor across nodes, and a lost node fires every relationship crossing to it. See [ROADMAP.md](./ROADMAP.md) for what's built and what isn't.
 
 See [CONTEXT.md](./CONTEXT.md) for the project's vocabulary.
 
@@ -52,7 +52,7 @@ plasmoid start target/wasm32-wasip1/release/greeter.wasm --spawn greeter --name 
 └─────────────────────────────────────────────┘
 ```
 
-Each particle has an unbounded mailbox and receives messages sequentially — it never handles two at once, so its linear memory needs no locking. Particles can spawn other particles, and `link` / `monitor` / `trap-exit` provide the primitives OTP-style supervision is built from.
+Each particle has an unbounded mailbox and receives messages sequentially — it never handles two at once, so its linear memory needs no locking. Particles can spawn other particles, and `link` / `monitor` / `trap-exit` provide the primitives OTP-style supervision is built from — across nodes as well as within one.
 
 Nodes form a peer-to-peer QUIC mesh with cryptographic identity, discovered over mDNS on the local network with relay fallback.
 
@@ -228,9 +228,9 @@ interface host {
     resolve:    func(pid-string: string) -> option<pid>;
 
     // Failure
-    link:      func(dest: destination) -> result<_, link-error>;
+    link:      func(dest: destination);          // infallible; noproc arrives as a signal
     unlink:    func(dest: destination);
-    monitor:   func(dest: destination) -> u64;
+    monitor:   func(dest: destination) -> u64;   // always a valid ref
     demonitor: func(ref: u64);
     trap-exit: func(enabled: bool);
 

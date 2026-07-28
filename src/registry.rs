@@ -52,10 +52,16 @@ pub struct ParticleRegistry {
 ///
 /// The registered name rides along because `exit_particle` has already removed
 /// it by the time a subscriber runs — there is no way to look it up afterwards.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ParticleDeath {
     pub pid: Pid,
     pub name: Option<String>,
+    pub reason: ExitReason,
+    /// Particles on other nodes linked to the deceased. They cannot be told
+    /// locally, so a forwarder sends them exit signals over the peer link.
+    pub remote_links: Vec<Pid>,
+    /// Watchers on other nodes, with the ref each is waiting on.
+    pub remote_monitors: Vec<(Pid, u64)>,
 }
 
 /// How many deaths may queue for a slow subscriber before the oldest are dropped.
@@ -201,6 +207,104 @@ impl ParticleRegistry {
             },
         );
         pid
+    }
+
+    /// Record our half of a link to a particle on another node.
+    ///
+    /// One-sided by necessity: the peer records its own half when the link
+    /// control message arrives, because neither node can write the other's state.
+    pub async fn link_remote(&self, local: &Pid, remote: Pid) {
+        if let Some(state) = self.particle_states.write().await.get_mut(local) {
+            state.links.insert(remote);
+        }
+    }
+
+    pub async fn unlink_remote(&self, local: &Pid, remote: &Pid) {
+        if let Some(state) = self.particle_states.write().await.get_mut(local) {
+            state.links.remove(remote);
+        }
+    }
+
+    /// Record that a watcher on another node is monitoring a local particle.
+    pub async fn monitor_remote(&self, watcher: &Pid, target: Pid, ref_id: u64) {
+        let mut states = self.particle_states.write().await;
+        if let Some(state) = states.get_mut(watcher) {
+            state.monitors.insert(ref_id, target.clone());
+        }
+        if let Some(state) = states.get_mut(&target) {
+            state.monitored_by.push((watcher.clone(), ref_id));
+        }
+    }
+
+    /// Monitor with a caller-supplied ref, so the ref exists before the target
+    /// is known to and can be reported in an immediate `noproc`.
+    pub async fn monitor_with_ref(&self, watcher: &Pid, target: &Pid, ref_id: u64) {
+        let mut states = self.particle_states.write().await;
+        if let Some(state) = states.get_mut(watcher) {
+            state.monitors.insert(ref_id, target.clone());
+        }
+        if let Some(state) = states.get_mut(target) {
+            state.monitored_by.push((watcher.clone(), ref_id));
+        }
+    }
+
+    /// Deliver an exit signal straight to a local particle's mailbox.
+    pub async fn deliver_exit(&self, to: &Pid, from: &Pid, reason: ExitReason) {
+        let _ = self
+            .send_system(
+                to,
+                SystemMessage::Exit {
+                    from: from.clone(),
+                    reason,
+                },
+            )
+            .await;
+    }
+
+    /// Deliver a down signal straight to a local particle's mailbox.
+    pub async fn deliver_down(&self, to: &Pid, from: &Pid, ref_id: u64, reason: ExitReason) {
+        let _ = self
+            .send_system(
+                to,
+                SystemMessage::Down {
+                    from: from.clone(),
+                    monitor_ref: ref_id,
+                    reason,
+                },
+            )
+            .await;
+    }
+
+    /// Every local particle holding a relationship with a particle on `node`.
+    ///
+    /// Used when a node is lost: each such relationship must fire, individually,
+    /// so a lost node is indistinguishable from separate deaths (#17).
+    pub async fn relationships_with_node(
+        &self,
+        node: &iroh::EndpointId,
+    ) -> (Vec<(Pid, Pid)>, Vec<(Pid, Pid, u64)>) {
+        let states = self.particle_states.read().await;
+        let mut links = Vec::new();
+        let mut monitors = Vec::new();
+        for (pid, state) in states.iter() {
+            for linked in state.links.iter().filter(|p| p.is_local_to(node)) {
+                links.push((pid.clone(), linked.clone()));
+            }
+            for (ref_id, target) in state.monitors.iter().filter(|(_, t)| t.is_local_to(node)) {
+                monitors.push((pid.clone(), target.clone(), *ref_id));
+            }
+        }
+        (links, monitors)
+    }
+
+    /// Drop every relationship with a node we can no longer reach.
+    pub async fn forget_node(&self, node: &iroh::EndpointId) {
+        let mut states = self.particle_states.write().await;
+        for state in states.values_mut() {
+            state.links.retain(|p| !p.is_local_to(node));
+            state.monitors.retain(|_, t| !t.is_local_to(node));
+            state.monitored_by.retain(|(w, _)| !w.is_local_to(node));
+        }
     }
 
     /// Look up a particle by PID.
@@ -482,15 +586,33 @@ impl ParticleRegistry {
             name
         };
 
+        let links = particle_state.links;
+        let monitored_by = particle_state.monitored_by;
+
+        // Split the relationships that cannot be honoured locally. A particle on
+        // another node cannot be reached through the registry, so the death is
+        // published with them attached and a forwarder sends the signals.
+        let me = self.pid_gen.node();
+        let remote_links: Vec<Pid> = links
+            .iter()
+            .filter(|p| !p.is_local_to(&me))
+            .cloned()
+            .collect();
+        let remote_monitors: Vec<(Pid, u64)> = monitored_by
+            .iter()
+            .filter(|(w, _)| !w.is_local_to(&me))
+            .cloned()
+            .collect();
+
         // Publish the death. Send fails only when nobody is listening, which is
         // the normal case for a node with no distributed registry attached.
         let _ = self.deaths.send(ParticleDeath {
             pid: pid.clone(),
             name: registered_name,
+            reason: reason.clone(),
+            remote_links,
+            remote_monitors,
         });
-
-        let links = particle_state.links;
-        let monitored_by = particle_state.monitored_by;
 
         // Determine the propagated reason for Kill signals
         let propagated_reason = match &reason {

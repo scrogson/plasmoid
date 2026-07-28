@@ -8,6 +8,7 @@ pub mod policy;
 pub mod protocol;
 pub mod registry;
 pub mod runtime;
+pub mod signals;
 pub mod transport;
 pub mod wire;
 

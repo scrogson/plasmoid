@@ -7,6 +7,11 @@ pub enum ExitReason {
     Kill,
     Shutdown(String),
     Exception(String),
+    /// The target did not exist. Delivered when a link or monitor names
+    /// something already gone, rather than returned from the call.
+    NoProc,
+    /// The node holding the target was lost.
+    NoConnection,
 }
 
 impl ExitReason {

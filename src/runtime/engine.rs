@@ -15,10 +15,19 @@ use iroh_docs::protocol::Docs;
 use iroh_gossip::net::{GOSSIP_ALPN, Gossip};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 use wasmtime::{Config, Engine};
 
 /// The single ALPN used for all plasmoid traffic.
 pub const PLASMOID_ALPN: &[u8] = b"plasmoid/1";
+
+/// How long a peer may be silent before it is considered down.
+///
+/// Erlang's `net_ticktime` default, adopted for its reasoning rather than its
+/// number: the cost of being wrong is asymmetric. A false positive kills live
+/// particles, while being slow only delays supervision — and on a mesh with
+/// relay fallback and hole punching, multi-second gaps are ordinary. See #17.
+pub const DEFAULT_NODE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The runtime - hosts WASM component instances on an iroh endpoint.
 pub struct Runtime {
@@ -78,6 +87,17 @@ impl Runtime {
     /// `<data_dir>/secret_key`, giving the node a stable identity across restarts.
     /// If `None`, a random key is generated each time.
     pub async fn new(data_dir: Option<&Path>) -> Result<Self> {
+        Self::with_node_timeout(data_dir, DEFAULT_NODE_TIMEOUT).await
+    }
+
+    /// Create a runtime with a custom node-failure detection window.
+    ///
+    /// Exists because the default is deliberately slow: a minute is right for
+    /// production and useless in a test that needs to observe a node dying.
+    pub async fn with_node_timeout(
+        data_dir: Option<&Path>,
+        node_timeout: Duration,
+    ) -> Result<Self> {
         // Configure wasmtime
         let mut config = Config::new();
         config.wasm_component_model(true);
@@ -91,10 +111,22 @@ impl Runtime {
         };
 
         // Configure iroh endpoint with mDNS for local network discovery
+        // The QUIC idle timeout is what declares a peer down (#17): keep-alives
+        // hold a healthy link open, and exceeding the timeout closes it, which
+        // is what `Connection::closed` observes. No tick protocol of our own.
+        let transport = iroh::endpoint::QuicTransportConfig::builder()
+            .keep_alive_interval(node_timeout / 4)
+            .max_idle_timeout(Some(
+                node_timeout
+                    .try_into()
+                    .map_err(|_| anyhow::anyhow!("node timeout out of range"))?,
+            ));
+
         let mdns = iroh_mdns_address_lookup::MdnsAddressLookup::builder();
         let endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
             .secret_key(secret_key)
             .address_lookup(mdns)
+            .transport_config(transport.build())
             .bind()
             .await?;
 
@@ -131,6 +163,9 @@ impl Runtime {
             Some(doc_registry.clone()),
             peers.clone(),
         );
+
+        crate::signals::spawn_signal_forwarder(registry.clone(), peers.clone());
+        crate::signals::spawn_node_loss_reactor(registry.clone(), peers.clone());
 
         let router = Router::builder(endpoint.clone())
             .accept(PLASMOID_ALPN, protocol)
@@ -204,11 +239,11 @@ impl Runtime {
             return;
         }
         let node = target.node;
-        let envelope = crate::transport::Envelope {
+        let envelope = crate::transport::PeerMessage::Deliver(crate::transport::Envelope {
             target: crate::transport::Addressee::Pid(target),
             ref_id,
             payload: msg,
-        };
+        });
         let _ = self.peers.send(node, &envelope);
     }
 
@@ -236,6 +271,12 @@ impl Runtime {
             init_args.to_string(),
         )
         .await
+    }
+
+    /// The peer links this node sends over.
+    #[doc(hidden)]
+    pub fn peers_for_test(&self) -> Arc<crate::transport::PeerLinks> {
+        self.peers.clone()
     }
 
     /// Get a reference to the doc registry.

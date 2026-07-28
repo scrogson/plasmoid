@@ -20,6 +20,7 @@
 //!
 //! [#14]: https://github.com/scrogson/plasmoid/issues/14
 
+use crate::message::ExitReason;
 use crate::pid::Pid;
 use crate::runtime::PLASMOID_ALPN;
 use crate::wire;
@@ -52,6 +53,46 @@ pub struct Envelope {
     pub payload: Vec<u8>,
 }
 
+/// Everything that crosses a peer link.
+///
+/// Control messages travel the same ordered stream as data, so a link request
+/// cannot overtake a message sent before it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum PeerMessage {
+    Deliver(Envelope),
+    /// `from` (on the sending node) wants to link to `to` (on the receiving one).
+    Link {
+        from: Pid,
+        to: Addressee,
+    },
+    Unlink {
+        from: Pid,
+        to: Addressee,
+    },
+    Monitor {
+        watcher: Pid,
+        target: Addressee,
+        ref_id: u64,
+    },
+    Demonitor {
+        watcher: Pid,
+        ref_id: u64,
+    },
+    /// A linked particle died on the sending node.
+    Exit {
+        from: Pid,
+        to: Pid,
+        reason: ExitReason,
+    },
+    /// A monitored particle died on the sending node.
+    Down {
+        from: Pid,
+        to: Pid,
+        ref_id: u64,
+        reason: ExitReason,
+    },
+}
+
 /// Frames are length-prefixed so many can share one stream.
 ///
 /// Matches the cap on the request/response path. Mailboxes are unbounded, so a
@@ -59,8 +100,8 @@ pub struct Envelope {
 /// receiving node with a single message.
 pub const MAX_FRAME_LEN: u32 = 1024 * 1024;
 
-pub fn encode_frame(envelope: &Envelope) -> Result<Vec<u8>> {
-    let body = wire::serialize(envelope)?;
+pub fn encode_frame(msg: &PeerMessage) -> Result<Vec<u8>> {
+    let body = wire::serialize(msg)?;
     anyhow::ensure!(
         body.len() as u64 <= MAX_FRAME_LEN as u64,
         "message is larger than the {MAX_FRAME_LEN} byte frame limit"
@@ -74,7 +115,7 @@ pub fn encode_frame(envelope: &Envelope) -> Result<Vec<u8>> {
 /// Read one length-prefixed frame. `Ok(None)` means the peer closed the link.
 ///
 /// Lives beside [`encode_frame`] so the two halves of the format cannot drift.
-pub async fn read_frame(recv: &mut iroh::endpoint::RecvStream) -> Result<Option<Envelope>> {
+pub async fn read_frame(recv: &mut iroh::endpoint::RecvStream) -> Result<Option<PeerMessage>> {
     let mut len_buf = [0u8; 4];
     if recv.read_exact(&mut len_buf).await.is_err() {
         return Ok(None);
@@ -95,6 +136,9 @@ struct PeerLink {
 /// Outbound message links, one per peer node.
 pub struct PeerLinks {
     endpoint: Endpoint,
+    /// Published when a peer connection ends, so relationships crossing to it
+    /// can fire. See [`PeerLoss`].
+    pub loss: Arc<PeerLoss>,
     /// A std mutex on purpose: only ever held to look up or insert a queue
     /// handle, never across an await, so senders cannot be parked here.
     links: Mutex<HashMap<EndpointId, Arc<PeerLink>>>,
@@ -110,6 +154,7 @@ impl PeerLinks {
     pub fn new(endpoint: Endpoint) -> Self {
         Self {
             endpoint,
+            loss: Arc::new(PeerLoss::new()),
             links: Mutex::new(HashMap::new()),
         }
     }
@@ -122,8 +167,8 @@ impl PeerLinks {
     ///
     /// Fire-and-forget per [#14]: the `Err` here covers only encoding, never
     /// delivery, and never reaches the sending particle.
-    pub fn send(&self, node: EndpointId, envelope: &Envelope) -> Result<()> {
-        let frame = encode_frame(envelope)?;
+    pub fn send(&self, node: EndpointId, msg: &PeerMessage) -> Result<()> {
+        let frame = encode_frame(msg)?;
         let link = self.link_to(node);
         // Fails only if the writer task is gone, which means the message is
         // dropped — indistinguishable from any other delivery failure.
@@ -144,7 +189,12 @@ impl PeerLinks {
         links.insert(node, link.clone());
         drop(links);
 
-        tokio::spawn(write_to_peer(self.endpoint.clone(), node, rx));
+        tokio::spawn(write_to_peer(
+            self.endpoint.clone(),
+            node,
+            rx,
+            self.loss.clone(),
+        ));
         link
     }
 }
@@ -157,6 +207,7 @@ async fn write_to_peer(
     endpoint: Endpoint,
     node: EndpointId,
     mut frames: mpsc::UnboundedReceiver<Vec<u8>>,
+    loss: Arc<PeerLoss>,
 ) {
     let mut stream: Option<iroh::endpoint::SendStream> = None;
 
@@ -165,10 +216,11 @@ async fn write_to_peer(
         // last write, and reconnecting once is enough to tell.
         for attempt in 0..2 {
             if stream.is_none() {
-                match open_link(&endpoint, node).await {
+                match open_link(&endpoint, node, &loss).await {
                     Ok(s) => stream = Some(s),
                     Err(e) => {
                         tracing::debug!(peer = %node.fmt_short(), error = %e, "Could not reach peer; message dropped");
+                        loss.announce_lost(node);
                         break;
                     }
                 }
@@ -182,6 +234,7 @@ async fn write_to_peer(
                     stream = None;
                     if attempt == 1 {
                         tracing::debug!(peer = %node.fmt_short(), "Message dropped after reconnect");
+                        loss.announce_lost(node);
                     }
                 }
             }
@@ -191,14 +244,63 @@ async fn write_to_peer(
     tracing::debug!(peer = %node.fmt_short(), "Peer writer stopped");
 }
 
-async fn open_link(endpoint: &Endpoint, node: EndpointId) -> Result<iroh::endpoint::SendStream> {
+async fn open_link(
+    endpoint: &Endpoint,
+    node: EndpointId,
+    loss: &Arc<PeerLoss>,
+) -> Result<iroh::endpoint::SendStream> {
     let conn = endpoint
         .connect(node, PLASMOID_ALPN)
         .await
         .context("failed to connect to peer")?;
     let stream = conn.open_uni().await.context("failed to open peer link")?;
     tracing::debug!(peer = %node.fmt_short(), "Opened peer link");
+
+    // The QUIC idle timeout decides when a silent peer is gone; this resolves
+    // when it trips, and immediately on an explicit close.
+    let loss = loss.clone();
+    tokio::spawn(async move {
+        let reason = conn.closed().await;
+        tracing::info!(peer = %node.fmt_short(), %reason, "Peer connection ended");
+        loss.announce_lost(node);
+    });
+
     Ok(stream)
+}
+
+/// Watch a peer for loss, so relationships crossing to it can be torn down.
+///
+/// The QUIC idle timeout is the authority per [#17]: keep-alive plus
+/// `max_idle_timeout` decide when a silent peer is gone, and `Connection::closed`
+/// resolves when it trips — which also catches an explicit close immediately.
+/// Reimplementing this above the transport would duplicate what QUIC already
+/// does correctly, which is why Erlang's `net_ticktime` has no counterpart here.
+///
+/// [#17]: https://github.com/scrogson/plasmoid/issues/17
+pub struct PeerLoss {
+    lost: tokio::sync::broadcast::Sender<EndpointId>,
+}
+
+impl Default for PeerLoss {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PeerLoss {
+    pub fn new() -> Self {
+        Self {
+            lost: tokio::sync::broadcast::channel(256).0,
+        }
+    }
+
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<EndpointId> {
+        self.lost.subscribe()
+    }
+
+    pub fn announce_lost(&self, node: EndpointId) {
+        let _ = self.lost.send(node);
+    }
 }
 
 #[cfg(test)]
@@ -211,14 +313,18 @@ mod tests {
         PidGenerator::new(SecretKey::generate().public()).next()
     }
 
-    #[test]
-    fn test_frame_carries_its_length() {
-        let env = Envelope {
+    fn deliver(payload: &[u8]) -> PeerMessage {
+        PeerMessage::Deliver(Envelope {
             target: Addressee::Pid(a_pid()),
             ref_id: None,
-            payload: b"hello".to_vec(),
-        };
-        let frame = encode_frame(&env).unwrap();
+            payload: payload.to_vec(),
+        })
+    }
+
+    #[test]
+    fn test_frame_carries_its_length() {
+        let msg = deliver(b"hello");
+        let frame = encode_frame(&msg).unwrap();
 
         let len = u32::from_le_bytes(frame[..4].try_into().unwrap()) as usize;
         assert_eq!(
@@ -226,46 +332,74 @@ mod tests {
             frame.len() - 4,
             "the prefix must describe exactly the body that follows"
         );
-        assert_eq!(wire::deserialize::<Envelope>(&frame[4..]).unwrap(), env);
+        assert_eq!(wire::deserialize::<PeerMessage>(&frame[4..]).unwrap(), msg);
     }
 
     #[test]
     fn test_frames_concatenate_without_ambiguity() {
         // Many messages share one stream, so a reader must be able to split them
         // apart from the prefixes alone.
-        let a = Envelope {
-            target: Addressee::Pid(a_pid()),
-            ref_id: None,
-            payload: b"first".to_vec(),
-        };
-        let b = Envelope {
-            target: Addressee::Name("counter".into()),
-            ref_id: Some(7),
-            payload: b"second".to_vec(),
+        let a = deliver(b"first");
+        let b = PeerMessage::Link {
+            from: a_pid(),
+            to: Addressee::Name("counter".into()),
         };
 
         let mut buf = encode_frame(&a).unwrap();
         buf.extend_from_slice(&encode_frame(&b).unwrap());
 
         let len_a = u32::from_le_bytes(buf[..4].try_into().unwrap()) as usize;
-        let decoded_a: Envelope = wire::deserialize(&buf[4..4 + len_a]).unwrap();
+        let decoded_a: PeerMessage = wire::deserialize(&buf[4..4 + len_a]).unwrap();
         let rest = &buf[4 + len_a..];
         let len_b = u32::from_le_bytes(rest[..4].try_into().unwrap()) as usize;
-        let decoded_b: Envelope = wire::deserialize(&rest[4..4 + len_b]).unwrap();
+        let decoded_b: PeerMessage = wire::deserialize(&rest[4..4 + len_b]).unwrap();
 
         assert_eq!(decoded_a, a);
         assert_eq!(decoded_b, b);
     }
 
     #[test]
+    fn test_control_messages_share_the_ordered_stream() {
+        // Control and data travel the same link on purpose: a link request must
+        // not be able to overtake a message sent before it.
+        for msg in [
+            deliver(b"data"),
+            PeerMessage::Unlink {
+                from: a_pid(),
+                to: Addressee::Pid(a_pid()),
+            },
+            PeerMessage::Monitor {
+                watcher: a_pid(),
+                target: Addressee::Pid(a_pid()),
+                ref_id: 3,
+            },
+            PeerMessage::Exit {
+                from: a_pid(),
+                to: a_pid(),
+                reason: ExitReason::NoConnection,
+            },
+            PeerMessage::Down {
+                from: a_pid(),
+                to: a_pid(),
+                ref_id: 9,
+                reason: ExitReason::NoProc,
+            },
+        ] {
+            let frame = encode_frame(&msg).unwrap();
+            let decoded: PeerMessage = wire::deserialize(&frame[4..]).unwrap();
+            assert_eq!(decoded, msg);
+        }
+    }
+
+    #[test]
     fn test_oversized_messages_are_refused_rather_than_sent() {
-        let env = Envelope {
+        let msg = PeerMessage::Deliver(Envelope {
             target: Addressee::Pid(a_pid()),
             ref_id: None,
             payload: vec![0u8; MAX_FRAME_LEN as usize + 1],
-        };
+        });
         assert!(
-            encode_frame(&env).is_err(),
+            encode_frame(&msg).is_err(),
             "a frame the receiver would reject must not be queued"
         );
     }

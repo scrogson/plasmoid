@@ -75,6 +75,11 @@ impl PidGenerator {
         }
     }
 
+    /// The node these pids belong to.
+    pub fn node(&self) -> EndpointId {
+        self.node
+    }
+
     /// Generate the next unique PID.
     pub fn next(&self) -> Pid {
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);

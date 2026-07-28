@@ -322,75 +322,121 @@ impl plasmoid::runtime::host::Host for HostState {
         Ok(Some(resource))
     }
 
-    async fn link(
-        &mut self,
-        dest: plasmoid::runtime::host::Destination,
-    ) -> wasmtime::Result<Result<(), plasmoid::runtime::host::LinkError>> {
-        // The destination type is settled (#19); what a cross-node link *means*
-        // is not (#21). Anything off-node is refused rather than half-honoured.
-        let target_pid = match self.resolve_local(&dest) {
-            LocalTarget::Here(pid) => pid,
-            LocalTarget::Elsewhere(..) => {
-                return Ok(Err(plasmoid::runtime::host::LinkError::NotLocal));
+    /// Link to a destination, wherever it lives.
+    ///
+    /// Infallible per #21: a target that is already gone produces an exit
+    /// signal carrying `noproc`, delivered through the same channel its later
+    /// death would use. The caller therefore has one code path, not two.
+    async fn link(&mut self, dest: plasmoid::runtime::host::Destination) -> wasmtime::Result<()> {
+        let me = self.pid().clone();
+        match self.resolve_local(&dest) {
+            LocalTarget::Here(t) => {
+                let Some(registry) = self.registry().cloned() else {
+                    return Ok(());
+                };
+                match self.resolve_named(t).await {
+                    Some(target) if registry.link(&me, &target).await.is_ok() => {}
+                    // Nothing to link to: say so the way a death would.
+                    _ => {
+                        registry.deliver_exit(&me, &me, ExitReason::NoProc).await;
+                    }
+                }
             }
-            LocalTarget::Unknown => {
-                return Ok(Err(plasmoid::runtime::host::LinkError::NoParticle));
+            LocalTarget::Elsewhere(node, addressee) => {
+                // Record our half now; the peer records its own on arrival.
+                if let Some(registry) = self.registry().cloned()
+                    && let Addressee::Pid(ref target) = addressee
+                {
+                    registry.link_remote(&me, target.clone()).await;
+                }
+                self.send_control(
+                    node,
+                    crate::transport::PeerMessage::Link {
+                        from: me,
+                        to: addressee,
+                    },
+                );
             }
-        };
-        let target_pid = match self.resolve_named(target_pid).await {
-            Some(p) => p,
-            None => return Ok(Err(plasmoid::runtime::host::LinkError::NoParticle)),
-        };
-        let my_pid = self.pid().clone();
-
-        let registry = match self.registry() {
-            Some(r) => r.clone(),
-            None => return Ok(Err(plasmoid::runtime::host::LinkError::NoParticle)),
-        };
-
-        let result = registry
-            .link(&my_pid, &target_pid)
-            .await
-            .map_err(|_| plasmoid::runtime::host::LinkError::NoParticle);
-        Ok(result)
-    }
-
-    async fn unlink(&mut self, dest: plasmoid::runtime::host::Destination) -> wasmtime::Result<()> {
-        let LocalTarget::Here(t) = self.resolve_local(&dest) else {
-            return Ok(());
-        };
-        let Some(target_pid) = self.resolve_named(t).await else {
-            return Ok(());
-        };
-        let my_pid = self.pid().clone();
-
-        if let Some(registry) = self.registry() {
-            let registry = registry.clone();
-            registry.unlink(&my_pid, &target_pid).await;
+            LocalTarget::Unknown => {}
         }
         Ok(())
     }
 
+    async fn unlink(&mut self, dest: plasmoid::runtime::host::Destination) -> wasmtime::Result<()> {
+        let me = self.pid().clone();
+        match self.resolve_local(&dest) {
+            LocalTarget::Here(t) => {
+                if let Some(registry) = self.registry().cloned()
+                    && let Some(target) = self.resolve_named(t).await
+                {
+                    registry.unlink(&me, &target).await;
+                }
+            }
+            LocalTarget::Elsewhere(node, addressee) => {
+                if let Some(registry) = self.registry().cloned()
+                    && let Addressee::Pid(ref target) = addressee
+                {
+                    registry.unlink_remote(&me, target).await;
+                }
+                self.send_control(
+                    node,
+                    crate::transport::PeerMessage::Unlink {
+                        from: me,
+                        to: addressee,
+                    },
+                );
+            }
+            LocalTarget::Unknown => {}
+        }
+        Ok(())
+    }
+
+    /// Monitor a destination. Always returns a valid ref (#21).
     async fn monitor(
         &mut self,
         dest: plasmoid::runtime::host::Destination,
     ) -> wasmtime::Result<u64> {
-        let LocalTarget::Here(t) = self.resolve_local(&dest) else {
-            // Erlang returns a ref and then a DOWN; we cannot yet observe a
-            // remote particle's death, so refuse rather than promise it (#21).
-            return Ok(0);
-        };
-        let Some(target_pid) = self.resolve_named(t).await else {
-            return Ok(0);
-        };
-        let my_pid = self.pid().clone();
+        let me = self.pid().clone();
+        let ref_id = self.next_ref();
 
-        let registry = match self.registry() {
-            Some(r) => r.clone(),
-            None => return Ok(0),
-        };
-
-        Ok(registry.monitor(&my_pid, &target_pid).await.unwrap_or(0))
+        match self.resolve_local(&dest) {
+            LocalTarget::Here(t) => {
+                let Some(registry) = self.registry().cloned() else {
+                    return Ok(ref_id);
+                };
+                match self.resolve_named(t).await {
+                    Some(target) => registry.monitor_with_ref(&me, &target, ref_id).await,
+                    None => {
+                        registry
+                            .deliver_down(&me, &me, ref_id, ExitReason::NoProc)
+                            .await
+                    }
+                }
+            }
+            LocalTarget::Elsewhere(node, addressee) => {
+                if let Some(registry) = self.registry().cloned()
+                    && let Addressee::Pid(ref target) = addressee
+                {
+                    registry.monitor_remote(&me, target.clone(), ref_id).await;
+                }
+                self.send_control(
+                    node,
+                    crate::transport::PeerMessage::Monitor {
+                        watcher: me,
+                        target: addressee,
+                        ref_id,
+                    },
+                );
+            }
+            LocalTarget::Unknown => {
+                if let Some(registry) = self.registry().cloned() {
+                    registry
+                        .deliver_down(&me, &me, ref_id, ExitReason::NoProc)
+                        .await;
+                }
+            }
+        }
+        Ok(ref_id)
     }
 
     async fn demonitor(&mut self, monitor_ref: u64) -> wasmtime::Result<()> {
@@ -446,6 +492,8 @@ fn wit_exit_reason_to_internal(reason: plasmoid::runtime::host::ExitReason) -> E
         plasmoid::runtime::host::ExitReason::Kill => ExitReason::Kill,
         plasmoid::runtime::host::ExitReason::Shutdown(s) => ExitReason::Shutdown(s),
         plasmoid::runtime::host::ExitReason::Exception(s) => ExitReason::Exception(s),
+        plasmoid::runtime::host::ExitReason::Noproc => ExitReason::NoProc,
+        plasmoid::runtime::host::ExitReason::Noconnection => ExitReason::NoConnection,
     }
 }
 
@@ -456,6 +504,8 @@ fn internal_exit_reason_to_wit(reason: &ExitReason) -> plasmoid::runtime::host::
         ExitReason::Kill => plasmoid::runtime::host::ExitReason::Kill,
         ExitReason::Shutdown(s) => plasmoid::runtime::host::ExitReason::Shutdown(s.clone()),
         ExitReason::Exception(s) => plasmoid::runtime::host::ExitReason::Exception(s.clone()),
+        ExitReason::NoProc => plasmoid::runtime::host::ExitReason::Noproc,
+        ExitReason::NoConnection => plasmoid::runtime::host::ExitReason::Noconnection,
     }
 }
 
@@ -792,6 +842,17 @@ impl HostState {
         iroh::EndpointId::from_bytes(&bytes).ok()
     }
 
+    /// Queue a control message to a peer. Never blocks, like `send`.
+    fn send_control(&mut self, node: iroh::EndpointId, msg: crate::transport::PeerMessage) {
+        let Some(peers) = self.peers().cloned() else {
+            tracing::debug!("no peer transport; control message dropped");
+            return;
+        };
+        if let Err(e) = peers.send(node, &msg) {
+            tracing::debug!(peer = %node.fmt_short(), error = %e, "control message dropped");
+        }
+    }
+
     /// Route a message to wherever its destination lives.
     ///
     /// A pid carries its home node and a `named` destination names one, so this
@@ -834,11 +895,11 @@ impl HostState {
             tracing::debug!("no peer transport; remote message dropped");
             return;
         };
-        let envelope = crate::transport::Envelope {
+        let envelope = crate::transport::PeerMessage::Deliver(crate::transport::Envelope {
             target: addressee,
             ref_id,
             payload: msg,
-        };
+        });
         // Enqueues and returns; the peer's writer task owns the connection, so
         // a particle never waits on a handshake.
         if let Err(e) = peers.send(node, &envelope) {

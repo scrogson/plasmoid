@@ -6,7 +6,7 @@
 use plasmoid::Runtime;
 use plasmoid::mailbox::{Mailbox, MailboxMessage};
 use plasmoid::pid::Pid;
-use plasmoid::transport::{Addressee, Envelope, PeerLinks};
+use plasmoid::transport::{Addressee, Envelope, PeerLinks, PeerMessage};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,11 +33,11 @@ async fn test_message_reaches_a_particle_on_another_node() {
     peers
         .send(
             target.node,
-            &Envelope {
+            &PeerMessage::Deliver(Envelope {
                 target: Addressee::Pid(target.clone()),
                 ref_id: None,
                 payload: b"hello across the wire".to_vec(),
-            },
+            }),
         )
         .unwrap();
 
@@ -64,11 +64,11 @@ async fn test_cross_node_messages_arrive_in_send_order() {
         peers
             .send(
                 target.node,
-                &Envelope {
+                &PeerMessage::Deliver(Envelope {
                     target: Addressee::Pid(target.clone()),
                     ref_id: None,
                     payload: i.to_le_bytes().to_vec(),
-                },
+                }),
             )
             .unwrap();
     }
@@ -95,11 +95,11 @@ async fn test_tagged_messages_cross_the_boundary_too() {
     peers
         .send(
             target.node,
-            &Envelope {
+            &PeerMessage::Deliver(Envelope {
                 target: Addressee::Pid(target.clone()),
                 ref_id: Some(99),
                 payload: b"reply-to-me".to_vec(),
-            },
+            }),
         )
         .unwrap();
 
@@ -128,11 +128,11 @@ async fn test_sending_to_a_dead_remote_particle_is_silently_dropped() {
     peers
         .send(
             ghost.node,
-            &Envelope {
+            &PeerMessage::Deliver(Envelope {
                 target: Addressee::Pid(ghost),
                 ref_id: None,
                 payload: b"into the void".to_vec(),
-            },
+            }),
         )
         .expect("send must not report a delivery failure");
 
@@ -142,11 +142,11 @@ async fn test_sending_to_a_dead_remote_particle_is_silently_dropped() {
     peers
         .send(
             live.node,
-            &Envelope {
+            &PeerMessage::Deliver(Envelope {
                 target: Addressee::Pid(live),
                 ref_id: None,
                 payload: b"still here".to_vec(),
-            },
+            }),
         )
         .unwrap();
 
@@ -176,11 +176,11 @@ async fn test_send_does_not_wait_for_a_connection() {
         peers
             .send(
                 nowhere.node,
-                &Envelope {
+                &PeerMessage::Deliver(Envelope {
                     target: Addressee::Pid(nowhere.clone()),
                     ref_id: None,
                     payload: b"into the dark".to_vec(),
-                },
+                }),
             )
             .unwrap();
     }

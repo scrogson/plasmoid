@@ -397,7 +397,7 @@ async fn cmd_send(args: &[String]) -> Result<()> {
 // Scaffolding commands
 // ---------------------------------------------------------------------------
 
-const RUNTIME_WIT: &str = r#"package plasmoid:runtime@0.7.0;
+const RUNTIME_WIT: &str = r#"package plasmoid:runtime@0.8.0;
 
 interface host {
     resource pid {
@@ -450,10 +450,12 @@ interface host {
     unregister: func(name: string) -> result<_, registry-error>;
     lookup: func(name: string) -> option<pid>;
 
-    link: func(dest: destination) -> result<_, link-error>;
+    /// Infallible: if the target is already gone, that arrives as an exit
+    /// signal carrying `noproc`, not as a return value.
+    link: func(dest: destination);
     unlink: func(dest: destination);
-    /// Returns 0 if the destination cannot be monitored — an unknown particle,
-    /// or one on another node, since cross-node monitors are not implemented.
+    /// Always returns a valid ref. A target that does not exist produces an
+    /// immediate down signal carrying `noproc`.
     monitor: func(dest: destination) -> u64;
     demonitor: func(ref: u64);
     trap-exit: func(enabled: bool);
@@ -467,6 +469,10 @@ interface host {
         kill,
         shutdown(string),
         exception(string),
+        /// The target did not exist.
+        noproc,
+        /// The node holding the target was lost.
+        noconnection,
     }
 
     record exit-signal {
@@ -511,12 +517,6 @@ interface host {
         not-registered,
     }
 
-    enum link-error {
-        no-particle,
-        /// The destination is on another node. Cross-node links are not
-        /// implemented yet — see issue #21/#22.
-        not-local,
-    }
 }
 
 world particle {
@@ -737,7 +737,7 @@ bindings::export!({pascal_name} with_types_in bindings);
         r#"package {namespace}:{name}@0.1.0;
 
 world {name_underscored} {{
-    include plasmoid:runtime/particle@0.7.0;
+    include plasmoid:runtime/particle@0.8.0;
     export start: func() -> result<_, string>;
 }}
 "#

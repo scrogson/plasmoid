@@ -1,6 +1,9 @@
 use crate::doc_registry::DocRegistry;
+use crate::message::ExitReason;
+use crate::pid::Pid;
 use crate::registry::ParticleRegistry;
 use crate::runtime::start_particle;
+use crate::transport::{Addressee, PeerMessage, read_frame};
 use crate::wire::{
     Command, CommandResponse, SendRequest, SendResponse, SpawnRequest, SpawnResponse, SpawnResult,
     Target, deserialize, serialize,
@@ -85,8 +88,9 @@ impl iroh::protocol::ProtocolHandler for PlasmoidProtocol {
                     };
 
                     let registry = self.registry.clone();
+                    let peers = self.peers.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_message_link(recv, registry).await {
+                        if let Err(e) = handle_message_link(recv, registry, peers).await {
                             tracing::debug!(error = %e, "Peer link ended");
                         }
                     });
@@ -251,30 +255,99 @@ async fn handle_spawn(
 async fn handle_message_link(
     mut recv: iroh::endpoint::RecvStream,
     registry: Arc<ParticleRegistry>,
+    peers: Arc<crate::transport::PeerLinks>,
 ) -> anyhow::Result<()> {
-    use crate::transport::{Addressee, read_frame};
-
-    while let Some(envelope) = read_frame(&mut recv).await? {
-        // A name is resolved here, on the receiving node — that is what lets a
-        // named destination cost no round trip on the sending side.
-        let pid = match &envelope.target {
-            Addressee::Pid(p) => Some(p.clone()),
-            Addressee::Name(name) => registry.get_by_name(name).await,
-        };
-        let Some(pid) = pid else {
-            tracing::debug!(target = ?envelope.target, "no particle for destination; dropped");
-            continue;
-        };
-
-        // Fire-and-forget: a message for a particle that has died is dropped,
-        // exactly as it would be locally.
-        let delivered = match envelope.ref_id {
-            Some(r) => registry.send_tagged_to_pid(&pid, r, envelope.payload).await,
-            None => registry.send_to_pid(&pid, envelope.payload).await,
-        };
-        if delivered.is_err() {
-            tracing::debug!(pid = %pid, "message for an unknown particle; dropped");
-        }
+    while let Some(msg) = read_frame(&mut recv).await? {
+        handle_peer_message(msg, &registry, &peers).await;
     }
     Ok(())
+}
+
+/// Act on one message from a peer.
+///
+/// Names are resolved here, on the receiving node — that is what lets a named
+/// destination cost no round trip on the sending side.
+async fn handle_peer_message(
+    msg: PeerMessage,
+    registry: &Arc<ParticleRegistry>,
+    peers: &Arc<crate::transport::PeerLinks>,
+) {
+    async fn resolve(registry: &Arc<ParticleRegistry>, a: &Addressee) -> Option<Pid> {
+        match a {
+            Addressee::Pid(p) => Some(p.clone()),
+            Addressee::Name(name) => registry.get_by_name(name).await,
+        }
+    }
+
+    match msg {
+        PeerMessage::Deliver(envelope) => {
+            let Some(pid) = resolve(registry, &envelope.target).await else {
+                tracing::debug!(target = ?envelope.target, "no particle for destination; dropped");
+                return;
+            };
+            // Fire-and-forget: a message for a particle that has died is
+            // dropped, exactly as it would be locally.
+            let delivered = match envelope.ref_id {
+                Some(r) => registry.send_tagged_to_pid(&pid, r, envelope.payload).await,
+                None => registry.send_to_pid(&pid, envelope.payload).await,
+            };
+            if delivered.is_err() {
+                tracing::debug!(pid = %pid, "message for an unknown particle; dropped");
+            }
+        }
+        PeerMessage::Link { from, to } => {
+            match resolve(registry, &to).await {
+                // Record our half. The sender recorded its own before sending.
+                Some(target) => registry.link_remote(&target, from).await,
+                // Nothing here to link to: tell the linker the way a death would.
+                None => {
+                    let _ = peers.send(
+                        from.node,
+                        &PeerMessage::Exit {
+                            from: from.clone(),
+                            to: from,
+                            reason: ExitReason::NoProc,
+                        },
+                    );
+                }
+            }
+        }
+        PeerMessage::Unlink { from, to } => {
+            if let Some(target) = resolve(registry, &to).await {
+                registry.unlink_remote(&target, &from).await;
+            }
+        }
+        PeerMessage::Monitor {
+            watcher,
+            target,
+            ref_id,
+        } => match resolve(registry, &target).await {
+            Some(target_pid) => registry.monitor_remote(&watcher, target_pid, ref_id).await,
+            None => {
+                let _ = peers.send(
+                    watcher.node,
+                    &PeerMessage::Down {
+                        from: watcher.clone(),
+                        to: watcher,
+                        ref_id,
+                        reason: ExitReason::NoProc,
+                    },
+                );
+            }
+        },
+        PeerMessage::Demonitor { watcher, ref_id } => {
+            registry.demonitor(&watcher, ref_id).await;
+        }
+        PeerMessage::Exit { from, to, reason } => {
+            registry.deliver_exit(&to, &from, reason).await;
+        }
+        PeerMessage::Down {
+            from,
+            to,
+            ref_id,
+            reason,
+        } => {
+            registry.deliver_down(&to, &from, ref_id, reason).await;
+        }
+    }
 }
