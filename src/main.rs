@@ -21,7 +21,6 @@ Usage:
         --data-dir <dir>                     Data directory for persistent node identity
                                              (default: ~/.config/plasmoid)
         --load-path <dir>                    Load all .wasm files from directory
-        --peer <node-id>                     Bootstrap peer for cluster sync
         --spawn <component> [--name <name>] [--init <wave-expr>]
                                              Spawn a particle after loading
 
@@ -37,7 +36,6 @@ Usage:
 
 Examples:
   plasmoid start --load-path target/debug
-  plasmoid start --load-path target/debug --peer a3f7bc...
   plasmoid start echo.wasm --spawn echo --name echo
   plasmoid start --load-path target/debug --spawn echo --name echo
   plasmoid spawn --node a3f7bc... echo --name echo
@@ -100,7 +98,6 @@ fn default_data_dir() -> PathBuf {
 }
 
 async fn cmd_start(args: &[String]) -> Result<()> {
-    let mut peers: Vec<EndpointId> = Vec::new();
     let mut wasm_files: Vec<String> = Vec::new();
     let mut spawn_specs: Vec<SpawnSpec> = Vec::new();
     let mut data_dir: Option<PathBuf> = None;
@@ -113,16 +110,6 @@ async fn cmd_start(args: &[String]) -> Result<()> {
                     .get(i + 1)
                     .ok_or_else(|| anyhow::anyhow!("--data-dir requires a directory"))?;
                 data_dir = Some(PathBuf::from(dir));
-                i += 2;
-            }
-            "--peer" => {
-                let id_str = args
-                    .get(i + 1)
-                    .ok_or_else(|| anyhow::anyhow!("--peer requires a node ID"))?;
-                let peer_id: EndpointId = id_str
-                    .parse()
-                    .map_err(|e| anyhow::anyhow!("invalid peer node ID '{}': {}", id_str, e))?;
-                peers.push(peer_id);
                 i += 2;
             }
             "--load-path" => {
@@ -211,11 +198,6 @@ async fn cmd_start(args: &[String]) -> Result<()> {
 
     eprintln!("Node: {}", runtime.node_id());
     eprintln!();
-
-    // Join cluster with explicit peers (mDNS handles local discovery automatically)
-    if !peers.is_empty() {
-        runtime.join_cluster(peers).await?;
-    }
 
     // Load all WASM modules (without spawning)
     let mut loaded = Vec::new();

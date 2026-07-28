@@ -34,5 +34,4 @@ fn test_host_state_no_name() {
     assert!(state.endpoint().is_none());
     assert!(state.engine().is_none());
     assert!(state.registry().is_none());
-    assert!(state.doc_registry().is_none());
 }

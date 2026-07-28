@@ -4,7 +4,6 @@
 //! export dynamically via `Func::call`, and providing `recv`/`recv-ref` host
 //! functions that let the component own its control flow.
 
-use crate::doc_registry::DocRegistry;
 use crate::host::HostState;
 use crate::mailbox::{Mailbox, MailboxMessage, SpawnFailure};
 use crate::message::ExitReason;
@@ -78,7 +77,6 @@ impl plasmoid::runtime::host::Host for HostState {
             None => return Ok(Err(plasmoid::runtime::host::SpawnError::InitFailed)),
         };
         let endpoint = self.endpoint().cloned();
-        let doc_registry = self.doc_registry().cloned();
         let peers = self.peers().cloned();
 
         // Look up the component template
@@ -112,7 +110,6 @@ impl plasmoid::runtime::host::Host for HostState {
                 mailbox,
                 registry: registry_clone,
                 endpoint,
-                doc_registry,
                 peers,
             },
         )
@@ -622,7 +619,6 @@ pub struct ParticleContext {
     pub mailbox: Arc<Mailbox>,
     pub registry: Arc<ParticleRegistry>,
     pub endpoint: Option<Endpoint>,
-    pub doc_registry: Option<Arc<DocRegistry>>,
     pub peers: Option<Arc<crate::transport::PeerLinks>>,
 }
 
@@ -647,7 +643,6 @@ pub async fn start_particle(
     state.set_endpoint(ctx.endpoint);
     state.set_engine(Some(engine.clone()));
     state.set_registry(Some(ctx.registry.clone()));
-    state.set_doc_registry(ctx.doc_registry);
     state.set_peers(ctx.peers);
     state.set_mailbox(Some(ctx.mailbox));
 
@@ -934,7 +929,6 @@ impl HostState {
             mailbox: self.mailbox().cloned()?,
             registry: self.registry().cloned()?,
             endpoint: self.endpoint().cloned(),
-            doc_registry: self.doc_registry().cloned(),
             peers: self.peers().cloned(),
         })
     }

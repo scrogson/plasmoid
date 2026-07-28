@@ -1,4 +1,3 @@
-use crate::doc_registry::DocRegistry;
 use crate::mailbox::Mailbox;
 use crate::pid::Pid;
 use crate::policy::PolicySet;
@@ -18,7 +17,6 @@ pub struct HostState {
     endpoint: Option<Endpoint>,
     engine: Option<Engine>,
     registry: Option<Arc<ParticleRegistry>>,
-    doc_registry: Option<Arc<DocRegistry>>,
     mailbox: Option<Arc<Mailbox>>,
     peers: Option<Arc<crate::transport::PeerLinks>>,
     next_ref: AtomicU64,
@@ -54,7 +52,6 @@ impl HostState {
             endpoint: None,
             engine: None,
             registry: None,
-            doc_registry: None,
             mailbox: None,
             peers: None,
             next_ref: AtomicU64::new(1),
@@ -101,14 +98,6 @@ impl HostState {
 
     pub fn set_registry(&mut self, registry: Option<Arc<ParticleRegistry>>) {
         self.registry = registry;
-    }
-
-    pub fn doc_registry(&self) -> Option<&Arc<DocRegistry>> {
-        self.doc_registry.as_ref()
-    }
-
-    pub fn set_doc_registry(&mut self, doc_registry: Option<Arc<DocRegistry>>) {
-        self.doc_registry = doc_registry;
     }
 
     pub fn mailbox(&self) -> Option<&Arc<Mailbox>> {

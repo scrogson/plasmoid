@@ -13,9 +13,6 @@ license = "MIT"
 iroh = "1.0"
 # mDNS address lookup moved out of the `iroh` crate in 1.0
 iroh-mdns-address-lookup = "0.4"
-iroh-gossip = "0.101"
-iroh-docs = "0.101"
-iroh-blobs = "0.103"
 
 # Encoding
 hex = "0.4"

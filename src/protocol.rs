@@ -1,4 +1,3 @@
-use crate::doc_registry::DocRegistry;
 use crate::message::ExitReason;
 use crate::pid::Pid;
 use crate::registry::ParticleRegistry;
@@ -23,7 +22,6 @@ pub struct PlasmoidProtocol {
     registry: Arc<ParticleRegistry>,
     engine: Engine,
     endpoint: Endpoint,
-    doc_registry: Option<Arc<DocRegistry>>,
     peers: Arc<crate::transport::PeerLinks>,
 }
 
@@ -32,14 +30,12 @@ impl PlasmoidProtocol {
         registry: Arc<ParticleRegistry>,
         engine: Engine,
         endpoint: Endpoint,
-        doc_registry: Option<Arc<DocRegistry>>,
         peers: Arc<crate::transport::PeerLinks>,
     ) -> Self {
         Self {
             registry,
             engine,
             endpoint,
-            doc_registry,
             peers,
         }
     }
@@ -66,12 +62,11 @@ impl iroh::protocol::ProtocolHandler for PlasmoidProtocol {
                     let registry = self.registry.clone();
                     let engine = self.engine.clone();
                     let endpoint = self.endpoint.clone();
-                    let doc_registry = self.doc_registry.clone();
                     let peers = self.peers.clone();
 
                     tokio::spawn(async move {
                         if let Err(e) =
-                            handle_stream(send, recv, registry, engine, endpoint, doc_registry, peers).await
+                            handle_stream(send, recv, registry, engine, endpoint, peers).await
                         {
                             tracing::error!(error = %e, "Stream handler error");
                         }
@@ -108,7 +103,6 @@ async fn handle_stream(
     registry: Arc<ParticleRegistry>,
     engine: Engine,
     endpoint: Endpoint,
-    doc_registry: Option<Arc<DocRegistry>>,
     peers: Arc<crate::transport::PeerLinks>,
 ) -> anyhow::Result<()> {
     let request_bytes = recv.read_to_end(1024 * 1024).await?;
@@ -124,9 +118,7 @@ async fn handle_stream(
 
     let result = match command {
         Command::Send(request) => handle_send(request, registry).await,
-        Command::Spawn(request) => {
-            handle_spawn(request, registry, engine, endpoint, doc_registry, peers).await
-        }
+        Command::Spawn(request) => handle_spawn(request, registry, engine, endpoint, peers).await,
     };
 
     let response_bytes = serialize(&result)?;
@@ -168,7 +160,6 @@ async fn handle_spawn(
     registry: Arc<ParticleRegistry>,
     engine: Engine,
     endpoint: Endpoint,
-    doc_registry: Option<Arc<DocRegistry>>,
     peers: Arc<crate::transport::PeerLinks>,
 ) -> CommandResponse {
     tracing::debug!(
@@ -217,7 +208,6 @@ async fn handle_spawn(
             mailbox,
             registry: registry.clone(),
             endpoint: Some(endpoint),
-            doc_registry: doc_registry.clone(),
             peers: Some(peers.clone()),
         },
     )
@@ -227,15 +217,6 @@ async fn handle_spawn(
         return CommandResponse::Spawn(SpawnResponse {
             result: Err(crate::wire::SpawnFailureWire::InitFailed),
         });
-    }
-
-    // Announce to doc registry for cross-node discovery
-    if let Some(ref doc_reg) = doc_registry
-        && let Err(e) = doc_reg
-            .announce_spawn(&pid, &request.component, request.name.as_deref())
-            .await
-    {
-        tracing::debug!(error = %e, "Failed to announce spawn (no peers yet?)");
     }
 
     CommandResponse::Spawn(SpawnResponse {

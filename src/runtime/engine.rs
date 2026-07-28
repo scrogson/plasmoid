@@ -1,4 +1,3 @@
-use crate::doc_registry::DocRegistry;
 use crate::pid::{Pid, PidGenerator};
 use crate::policy::PolicySet;
 use crate::protocol::PlasmoidProtocol;
@@ -7,12 +6,6 @@ use crate::runtime::start_particle;
 use anyhow::Result;
 use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
-use iroh_blobs::BlobsProtocol;
-use iroh_blobs::protocol::ALPN as BLOBS_ALPN;
-use iroh_blobs::store::mem::MemStore;
-use iroh_docs::net::ALPN as DOCS_ALPN;
-use iroh_docs::protocol::Docs;
-use iroh_gossip::net::{GOSSIP_ALPN, Gossip};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,7 +28,6 @@ pub struct Runtime {
     endpoint: Endpoint,
     engine: Engine,
     registry: Arc<ParticleRegistry>,
-    doc_registry: Arc<DocRegistry>,
     peers: Arc<crate::transport::PeerLinks>,
 }
 
@@ -133,34 +125,12 @@ impl Runtime {
         let pid_gen = PidGenerator::new(endpoint.id());
         let registry = Arc::new(ParticleRegistry::new(pid_gen, engine.clone()));
 
-        // Create blob store (in-memory)
-        let blobs = MemStore::new();
-
-        // Create gossip instance (used by iroh-docs internally for sync)
-        let gossip = Gossip::builder().spawn(endpoint.clone());
-
-        // Create docs protocol backed by blobs and gossip
-        let docs = Docs::memory()
-            .spawn(endpoint.clone(), blobs.clone().into(), gossip.clone())
-            .await?;
-
-        // Create doc-backed distributed registry and start event processing
-        let doc_registry = DocRegistry::new(
-            registry.clone(),
-            endpoint.clone(),
-            docs.clone(),
-            blobs.clone(),
-        )
-        .await?;
-        doc_registry.start(&[]).await?;
-
         let peers = Arc::new(crate::transport::PeerLinks::new(endpoint.clone()));
 
         let protocol = PlasmoidProtocol::new(
             registry.clone(),
             engine.clone(),
             endpoint.clone(),
-            Some(doc_registry.clone()),
             peers.clone(),
         );
 
@@ -169,9 +139,6 @@ impl Runtime {
 
         let router = Router::builder(endpoint.clone())
             .accept(PLASMOID_ALPN, protocol)
-            .accept(GOSSIP_ALPN, gossip)
-            .accept(BLOBS_ALPN, BlobsProtocol::new(&blobs, None))
-            .accept(DOCS_ALPN, docs)
             .spawn();
 
         tracing::info!(endpoint_id = %endpoint.id(), "Runtime initialized");
@@ -181,7 +148,6 @@ impl Runtime {
             endpoint,
             engine,
             registry,
-            doc_registry,
             peers,
         })
     }
@@ -220,7 +186,6 @@ impl Runtime {
             mailbox,
             registry: self.registry.clone(),
             endpoint: Some(self.endpoint.clone()),
-            doc_registry: Some(self.doc_registry.clone()),
             peers: Some(self.peers.clone()),
         }
     }
@@ -277,18 +242,6 @@ impl Runtime {
     #[doc(hidden)]
     pub fn peers_for_test(&self) -> Arc<crate::transport::PeerLinks> {
         self.peers.clone()
-    }
-
-    /// Get a reference to the doc registry.
-    pub fn doc_registry(&self) -> &Arc<DocRegistry> {
-        &self.doc_registry
-    }
-
-    /// Add bootstrap peers to the cluster for doc sync.
-    pub async fn join_cluster(&self, peers: Vec<EndpointId>) -> Result<()> {
-        self.doc_registry.add_peers(&peers).await?;
-        tracing::info!(peers = peers.len(), "Joined cluster");
-        Ok(())
     }
 
     /// Load a WASM component without spawning any particle.
@@ -363,15 +316,6 @@ impl Runtime {
         )
         .await?;
 
-        // Announce to registry document (best-effort)
-        if let Err(e) = self
-            .doc_registry
-            .announce_spawn(&pid, component, name)
-            .await
-        {
-            tracing::debug!(error = %e, "Failed to announce spawn (no peers yet?)");
-        }
-
         Ok(pid)
     }
 
@@ -386,11 +330,6 @@ impl Runtime {
 
         wait_for_shutdown_signal().await?;
         tracing::info!("Shutting down");
-
-        // Deregister before tearing down the router, so peers stop resolving
-        // this node's particles immediately rather than waiting to notice the
-        // connection is gone.
-        self.doc_registry.announce_all_down().await;
 
         self.router.shutdown().await?;
         Ok(())
