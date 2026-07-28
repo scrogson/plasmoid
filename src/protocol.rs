@@ -23,6 +23,7 @@ pub struct PlasmoidProtocol {
     engine: Engine,
     endpoint: Endpoint,
     peers: Arc<crate::transport::PeerLinks>,
+    cluster: Arc<crate::cluster::Cluster>,
 }
 
 impl PlasmoidProtocol {
@@ -31,12 +32,14 @@ impl PlasmoidProtocol {
         engine: Engine,
         endpoint: Endpoint,
         peers: Arc<crate::transport::PeerLinks>,
+        cluster: Arc<crate::cluster::Cluster>,
     ) -> Self {
         Self {
             registry,
             engine,
             endpoint,
             peers,
+            cluster,
         }
     }
 }
@@ -46,6 +49,12 @@ impl iroh::protocol::ProtocolHandler for PlasmoidProtocol {
         let remote = connection.remote_id();
 
         tracing::debug!(remote = %remote, "Plasmoid connection accepted");
+
+        // Connecting is joining (#26). A node that dials us is a member, and we
+        // tell it who else we know so the mesh converges from one introduction.
+        if !self.cluster.learn([remote]).await.is_empty() {
+            announce_to(&self.cluster, &self.peers, &[remote]).await;
+        }
 
         loop {
             tokio::select! {
@@ -84,8 +93,9 @@ impl iroh::protocol::ProtocolHandler for PlasmoidProtocol {
 
                     let registry = self.registry.clone();
                     let peers = self.peers.clone();
+                    let cluster = self.cluster.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_message_link(recv, registry, peers).await {
+                        if let Err(e) = handle_message_link(recv, registry, peers, cluster).await {
                             tracing::debug!(error = %e, "Peer link ended");
                         }
                     });
@@ -237,9 +247,10 @@ async fn handle_message_link(
     mut recv: iroh::endpoint::RecvStream,
     registry: Arc<ParticleRegistry>,
     peers: Arc<crate::transport::PeerLinks>,
+    cluster: Arc<crate::cluster::Cluster>,
 ) -> anyhow::Result<()> {
     while let Some(msg) = read_frame(&mut recv).await? {
-        handle_peer_message(msg, &registry, &peers).await;
+        handle_peer_message(msg, &registry, &peers, &cluster).await;
     }
     Ok(())
 }
@@ -252,6 +263,7 @@ async fn handle_peer_message(
     msg: PeerMessage,
     registry: &Arc<ParticleRegistry>,
     peers: &Arc<crate::transport::PeerLinks>,
+    cluster: &Arc<crate::cluster::Cluster>,
 ) {
     async fn resolve(registry: &Arc<ParticleRegistry>, a: &Addressee) -> Option<Pid> {
         match a {
@@ -261,6 +273,15 @@ async fn handle_peer_message(
     }
 
     match msg {
+        PeerMessage::Announce { nodes } => {
+            // Announce onward only when we learned something, or announcements
+            // would circulate forever between peers that already agree.
+            let learned = cluster.learn(nodes).await;
+            if !learned.is_empty() {
+                tracing::info!(count = learned.len(), "Learned of new cluster members");
+                announce_to(cluster, peers, &learned).await;
+            }
+        }
         PeerMessage::Deliver(envelope) => {
             let Some(pid) = resolve(registry, &envelope.target).await else {
                 tracing::debug!(target = ?envelope.target, "no particle for destination; dropped");
@@ -329,6 +350,25 @@ async fn handle_peer_message(
             reason,
         } => {
             registry.deliver_down(&to, &from, ref_id, reason).await;
+        }
+    }
+}
+
+/// Tell some nodes about the whole cluster, and tell the cluster about them.
+///
+/// Sending to a node dials it if needed, so this both introduces us and pulls
+/// the new members into the mesh.
+pub(crate) async fn announce_to(
+    cluster: &Arc<crate::cluster::Cluster>,
+    peers: &Arc<crate::transport::PeerLinks>,
+    to: &[iroh::EndpointId],
+) {
+    let roster = cluster.nodes().await;
+    for node in to {
+        // Do not name the recipient to itself; it is not its own peer.
+        let nodes: Vec<_> = roster.iter().copied().filter(|n| n != node).collect();
+        if let Err(e) = peers.send(*node, &PeerMessage::Announce { nodes }) {
+            tracing::debug!(peer = %node.fmt_short(), error = %e, "Announce dropped");
         }
     }
 }

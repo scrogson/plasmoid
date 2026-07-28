@@ -29,6 +29,7 @@ pub struct Runtime {
     engine: Engine,
     registry: Arc<ParticleRegistry>,
     peers: Arc<crate::transport::PeerLinks>,
+    cluster: Arc<crate::cluster::Cluster>,
 }
 
 /// Load or generate a secret key from a data directory.
@@ -126,14 +127,17 @@ impl Runtime {
         let registry = Arc::new(ParticleRegistry::new(pid_gen, engine.clone()));
 
         let peers = Arc::new(crate::transport::PeerLinks::new(endpoint.clone()));
+        let cluster = Arc::new(crate::cluster::Cluster::new(endpoint.id()));
 
         let protocol = PlasmoidProtocol::new(
             registry.clone(),
             engine.clone(),
             endpoint.clone(),
             peers.clone(),
+            cluster.clone(),
         );
 
+        crate::cluster_reactor::spawn_membership_reactor(cluster.clone(), peers.clone());
         crate::signals::spawn_signal_forwarder(registry.clone(), peers.clone());
         crate::signals::spawn_node_loss_reactor(registry.clone(), peers.clone());
 
@@ -149,6 +153,7 @@ impl Runtime {
             engine,
             registry,
             peers,
+            cluster,
         })
     }
 
@@ -236,6 +241,20 @@ impl Runtime {
             init_args.to_string(),
         )
         .await
+    }
+
+    /// The nodes this node is clustered with.
+    pub async fn nodes(&self) -> Vec<EndpointId> {
+        self.cluster.nodes().await
+    }
+
+    /// Introduce this node to a cluster via one of its members.
+    ///
+    /// One introduction is enough: the mesh is transitive, so this node learns
+    /// the rest and they learn it (#26).
+    pub async fn join(&self, peer: EndpointId) {
+        self.cluster.learn([peer]).await;
+        crate::protocol::announce_to(&self.cluster, &self.peers, &[peer]).await;
     }
 
     /// The peer links this node sends over.

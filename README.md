@@ -54,7 +54,7 @@ plasmoid start target/wasm32-wasip1/release/greeter.wasm --spawn greeter --name 
 
 Each particle has an unbounded mailbox and receives messages sequentially — it never handles two at once, so its linear memory needs no locking. Particles can spawn other particles, and `link` / `monitor` / `trap-exit` provide the primitives OTP-style supervision is built from — across nodes as well as within one.
 
-Nodes form a peer-to-peer QUIC mesh with cryptographic identity, discovered over mDNS on the local network with relay fallback.
+Nodes form a peer-to-peer QUIC mesh with cryptographic identity, discovered over mDNS on the local network with relay fallback. Introducing a node to one cluster member is enough — the mesh is transitive, so it learns the rest and they learn it.
 
 ## Plasmoid SDK
 
@@ -174,6 +174,7 @@ plasmoid start ring.wasm --spawn ring --init '{"orchestrator":[100,1000]}'
 plasmoid new <app-name>              Create a new application workspace
 plasmoid component new <name>        Create a new component
 plasmoid start [options] [<wasm>...] Boot a node and load components
+    --peer <node-id>                 Join the cluster that node belongs to
 plasmoid spawn <component>           Spawn a particle on a running node
 plasmoid send <target> <message>     Send a message to a particle
 ```

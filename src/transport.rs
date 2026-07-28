@@ -60,6 +60,14 @@ pub struct Envelope {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PeerMessage {
     Deliver(Envelope),
+    /// "I am here, and these are the nodes I know."
+    ///
+    /// Sent when a link is established and whenever the sender learns of a node
+    /// the recipient may not know. Carrying the whole roster is what makes the
+    /// mesh transitive: one introduction converges the cluster (#26).
+    Announce {
+        nodes: Vec<EndpointId>,
+    },
     /// `from` (on the sending node) wants to link to `to` (on the receiving one).
     Link {
         from: Pid,
