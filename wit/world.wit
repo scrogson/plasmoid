@@ -1,4 +1,4 @@
-package plasmoid:runtime@0.9.0;
+package plasmoid:runtime@0.10.0;
 
 interface host {
     resource pid {
@@ -70,6 +70,42 @@ interface host {
     register: func(name: string) -> result<_, registry-error>;
     unregister: func(name: string) -> result<_, registry-error>;
     lookup: func(name: string) -> option<pid>;
+
+    /// Claim a name across the whole cluster, so exactly one particle holds it.
+    ///
+    /// **Blocks.** Claiming locks every member, which is a round trip by
+    /// nature; Erlang's `global:register_name` is synchronous for the same
+    /// reason. Not a hot path.
+    ///
+    /// Losing a *simultaneous* claim is an ordinary `taken` return and nothing
+    /// dies. Losing a conflict discovered when two partitions merge is
+    /// different: nobody was wrong when they claimed, so the lower pid keeps
+    /// the name and the other particle is killed.
+    global-register: func(name: string) -> result<_, claim-error>;
+    global-unregister: func(name: string);
+
+    /// **Blocks** while two name tables are merging, so it never hands back a
+    /// particle that is about to lose a conflict and be killed. Erlang does not
+    /// wait, and may. Bounded: a merge has no natural limit, and an unbounded
+    /// wait would wedge every lookup the first time one stalled.
+    global-lookup: func(name: string) -> result<option<pid>, lookup-error>;
+
+    variant claim-error {
+        /// Held by a live particle.
+        taken(pid),
+        /// The claimant already holds a global name. Erlang allows a process
+        /// exactly one, and calls supporting several broken.
+        already-named(string),
+        /// The cluster would not settle: locks stayed busy, or membership kept
+        /// changing under the claim.
+        unsettled,
+    }
+
+    variant lookup-error {
+        /// A merge did not settle in time. The name may or may not exist —
+        /// which is why this is not `none`, a claim we cannot make.
+        unsettled,
+    }
 
     /// Infallible: if the target is already gone, that arrives as an exit
     /// signal carrying `noproc`, not as a return value.

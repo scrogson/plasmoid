@@ -48,7 +48,7 @@ plasmoid start target/wasm32-wasip1/release/greeter.wasm --spawn greeter --name 
 │  │ Host Functions                      │    │
 │  │ spawn, send, recv, link, monitor,   │    │
 │  │ exit-signal, trap-exit, register,   │    │
-│  │ lookup, log                         │    │
+│  │ lookup, global-register, log        │    │
 │  └─────────────────────────────────────┘    │
 └─────────────────────────────────────────────┘
 ```
@@ -228,10 +228,15 @@ interface host {
     recv:     func(timeout-ms: option<u64>) -> option<message>;
     recv-ref: func(ref: u64, timeout-ms: option<u64>) -> option<message>;
 
-    // Naming
+    // Naming, node-scoped
     register:   func(name: string) -> result<_, registry-error>;
     unregister: func(name: string) -> result<_, registry-error>;
     lookup:     func(name: string) -> option<pid>;
+
+    // Naming, cluster-wide: exactly one particle holds the name
+    global-register:   func(name: string) -> result<_, claim-error>;   // blocks
+    global-unregister: func(name: string);
+    global-lookup:     func(name: string) -> result<option<pid>, lookup-error>;
     resolve:    func(pid-string: string) -> option<pid>;
 
     // Failure

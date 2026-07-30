@@ -78,6 +78,8 @@ impl plasmoid::runtime::host::Host for HostState {
         };
         let endpoint = self.endpoint().cloned();
         let peers = self.peers().cloned();
+        let cluster = self.cluster().cloned();
+        let global = self.global().cloned();
 
         // Look up the component template
         let (comp, caps) = match registry.get_component(&component).await {
@@ -111,6 +113,8 @@ impl plasmoid::runtime::host::Host for HostState {
                 registry: registry_clone,
                 endpoint,
                 peers,
+                cluster,
+                global,
             },
         )
         .await
@@ -134,6 +138,69 @@ impl plasmoid::runtime::host::Host for HostState {
             registry.exit_particle(&pid, exit_reason).await;
         }
         Ok(())
+    }
+
+    /// Claim a name across the cluster (#28). Blocks.
+    ///
+    /// The second blocking call after `spawn-on`, and deliberately so: locking
+    /// every member is a round trip by nature, and Erlang's `register_name` is
+    /// synchronous for the same reason.
+    async fn global_register(
+        &mut self,
+        name: String,
+    ) -> wasmtime::Result<Result<(), plasmoid::runtime::host::ClaimError>> {
+        let (Some(global), Some(cluster)) = (self.global().cloned(), self.cluster().cloned())
+        else {
+            // No cluster attached: a test harness, or a node with distribution
+            // off. Nothing to disagree with us, so the claim is trivially ours.
+            return Ok(Ok(()));
+        };
+        let me = self.pid().clone();
+
+        Ok(match global.register(&name, &me, &cluster).await {
+            Ok(()) => Ok(()),
+            Err(crate::global::ClaimError::Taken(pid)) => Err(
+                plasmoid::runtime::host::ClaimError::Taken(self.resource_table_mut().push(pid)?),
+            ),
+            Err(crate::global::ClaimError::AlreadyNamed(n)) => {
+                Err(plasmoid::runtime::host::ClaimError::AlreadyNamed(n))
+            }
+            Err(crate::global::ClaimError::Unsettled) => {
+                Err(plasmoid::runtime::host::ClaimError::Unsettled)
+            }
+        })
+    }
+
+    async fn global_unregister(&mut self, name: String) -> wasmtime::Result<()> {
+        let (Some(global), Some(cluster)) = (self.global().cloned(), self.cluster().cloned())
+        else {
+            return Ok(());
+        };
+        let me = self.pid().clone();
+        global.unregister(&name, &me, &cluster).await;
+        Ok(())
+    }
+
+    /// Look a global name up, waiting for any merge to settle first (#31).
+    ///
+    /// Blocking here is the divergence from Erlang, which reads its table
+    /// unlocked and may return a pid that is about to lose a conflict and be
+    /// killed. Bounded, so a stalled merge reports `unsettled` rather than
+    /// wedging every lookup in the cluster.
+    async fn global_lookup(
+        &mut self,
+        name: String,
+    ) -> wasmtime::Result<Result<Option<Resource<Pid>>, plasmoid::runtime::host::LookupError>> {
+        let Some(global) = self.global().cloned() else {
+            return Ok(Ok(None));
+        };
+        Ok(match global.lookup(&name).await {
+            Ok(Some(pid)) => Ok(Some(self.resource_table_mut().push(pid)?)),
+            Ok(None) => Ok(None),
+            Err(crate::global::LookupError::Unsettled) => {
+                Err(plasmoid::runtime::host::LookupError::Unsettled)
+            }
+        })
     }
 
     /// Send an exit signal to another particle, wherever it lives (#27).
@@ -663,6 +730,8 @@ pub struct ParticleContext {
     pub registry: Arc<ParticleRegistry>,
     pub endpoint: Option<Endpoint>,
     pub peers: Option<Arc<crate::transport::PeerLinks>>,
+    pub cluster: Option<Arc<crate::cluster::Cluster>>,
+    pub global: Option<Arc<crate::global::GlobalNames>>,
 }
 
 impl std::fmt::Debug for ParticleContext {
@@ -687,6 +756,8 @@ pub async fn start_particle(
     state.set_engine(Some(engine.clone()));
     state.set_registry(Some(ctx.registry.clone()));
     state.set_peers(ctx.peers);
+    state.set_cluster(ctx.cluster);
+    state.set_global(ctx.global);
     state.set_mailbox(Some(ctx.mailbox));
 
     // Create store and linker
@@ -973,6 +1044,8 @@ impl HostState {
             registry: self.registry().cloned()?,
             endpoint: self.endpoint().cloned(),
             peers: self.peers().cloned(),
+            cluster: self.cluster().cloned(),
+            global: self.global().cloned(),
         })
     }
 }

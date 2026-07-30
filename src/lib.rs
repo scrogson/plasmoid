@@ -1,6 +1,7 @@
 pub mod client;
 pub mod cluster;
 pub mod cluster_reactor;
+pub mod global;
 pub mod host;
 pub mod mailbox;
 pub mod message;

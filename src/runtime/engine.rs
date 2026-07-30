@@ -32,6 +32,7 @@ pub struct Runtime {
     cluster: Arc<crate::cluster::Cluster>,
     #[allow(dead_code)]
     partitions: Arc<crate::partitions::Partitions>,
+    global: Arc<crate::global::GlobalNames>,
 }
 
 /// Load or generate a secret key from a data directory.
@@ -131,6 +132,10 @@ impl Runtime {
         let peers = Arc::new(crate::transport::PeerLinks::new(endpoint.clone()));
         let cluster = Arc::new(crate::cluster::Cluster::new(endpoint.id()));
         let partitions = Arc::new(crate::partitions::Partitions::new(endpoint.id()));
+        let global = Arc::new(crate::global::GlobalNames::new(
+            endpoint.id(),
+            endpoint.clone(),
+        ));
 
         let protocol = PlasmoidProtocol::new(
             registry.clone(),
@@ -139,10 +144,12 @@ impl Runtime {
             peers.clone(),
             cluster.clone(),
             partitions.clone(),
+            global.clone(),
         );
 
         crate::cluster_reactor::spawn_membership_reactor(cluster.clone(), peers.clone());
         crate::partitions::spawn_loss_reporter(cluster.clone(), peers.clone(), partitions.clone());
+        crate::global::spawn_death_reactor(global.clone(), registry.clone(), cluster.clone());
         crate::signals::spawn_signal_forwarder(registry.clone(), peers.clone());
         crate::signals::spawn_node_loss_reactor(registry.clone(), peers.clone());
 
@@ -160,6 +167,7 @@ impl Runtime {
             peers,
             cluster,
             partitions,
+            global,
         })
     }
 
@@ -198,6 +206,8 @@ impl Runtime {
             registry: self.registry.clone(),
             endpoint: Some(self.endpoint.clone()),
             peers: Some(self.peers.clone()),
+            cluster: Some(self.cluster.clone()),
+            global: Some(self.global.clone()),
         }
     }
 
@@ -264,6 +274,16 @@ impl Runtime {
     }
 
     /// The peer links this node sends over.
+    /// The cluster-wide name table.
+    pub fn global(&self) -> &Arc<crate::global::GlobalNames> {
+        &self.global
+    }
+
+    #[doc(hidden)]
+    pub fn cluster_for_test(&self) -> &Arc<crate::cluster::Cluster> {
+        &self.cluster
+    }
+
     #[doc(hidden)]
     pub fn peers_for_test(&self) -> Arc<crate::transport::PeerLinks> {
         self.peers.clone()

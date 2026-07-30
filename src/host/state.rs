@@ -19,6 +19,8 @@ pub struct HostState {
     registry: Option<Arc<ParticleRegistry>>,
     mailbox: Option<Arc<Mailbox>>,
     peers: Option<Arc<crate::transport::PeerLinks>>,
+    cluster: Option<Arc<crate::cluster::Cluster>>,
+    global: Option<Arc<crate::global::GlobalNames>>,
     next_ref: AtomicU64,
     wasi_ctx: WasiCtx,
     resource_table: ResourceTable,
@@ -54,6 +56,8 @@ impl HostState {
             registry: None,
             mailbox: None,
             peers: None,
+            cluster: None,
+            global: None,
             next_ref: AtomicU64::new(1),
             wasi_ctx: WasiCtxBuilder::new().build(),
             resource_table: ResourceTable::new(),
@@ -110,6 +114,22 @@ impl HostState {
 
     pub fn set_peers(&mut self, peers: Option<Arc<crate::transport::PeerLinks>>) {
         self.peers = peers;
+    }
+
+    pub fn cluster(&self) -> Option<&Arc<crate::cluster::Cluster>> {
+        self.cluster.as_ref()
+    }
+
+    pub fn set_cluster(&mut self, cluster: Option<Arc<crate::cluster::Cluster>>) {
+        self.cluster = cluster;
+    }
+
+    pub fn global(&self) -> Option<&Arc<crate::global::GlobalNames>> {
+        self.global.as_ref()
+    }
+
+    pub fn set_global(&mut self, global: Option<Arc<crate::global::GlobalNames>>) {
+        self.global = global;
     }
 
     pub fn set_mailbox(&mut self, mailbox: Option<Arc<Mailbox>>) {

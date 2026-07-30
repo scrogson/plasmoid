@@ -1,4 +1,5 @@
 use crate::pid::Pid;
+use iroh::EndpointId;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -62,6 +63,42 @@ pub struct SpawnResponse {
 pub enum Command {
     Send(SendRequest),
     Spawn(SpawnRequest),
+    /// A step of the global-name protocol (#28).
+    ///
+    /// Rides the request/response path rather than the ordered peer link
+    /// because every step needs an answer: a lock that cannot report refusal
+    /// is not a lock.
+    Global(GlobalRequest),
+}
+
+/// One step of the global-name lock, commit, or merge.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum GlobalRequest {
+    /// Take the lock on `name`, on behalf of `holder`.
+    Lock { name: String, holder: EndpointId },
+    /// Write `name -> pid` into the table. Sent only while holding the lock.
+    Commit {
+        name: String,
+        pid: Pid,
+        holder: EndpointId,
+    },
+    /// Release the lock, whether or not the claim succeeded.
+    Unlock { name: String, holder: EndpointId },
+    /// Remove `name`, because its particle died or unregistered.
+    Release { name: String, pid: Pid },
+    /// Exchange whole tables. The reply carries the responder's names.
+    Sync { names: Vec<(String, Pid)> },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum GlobalResponse {
+    Locked,
+    /// Somebody else is mid-claim on this name. The caller backs off.
+    Busy,
+    /// Already registered, and the holder is alive.
+    Taken(Pid),
+    Ok,
+    Names(Vec<(String, Pid)>),
 }
 
 /// Top-level response envelope sent over the wire.
@@ -69,6 +106,7 @@ pub enum Command {
 pub enum CommandResponse {
     Send(SendResponse),
     Spawn(SpawnResponse),
+    Global(GlobalResponse),
 }
 
 #[derive(Debug, Error)]

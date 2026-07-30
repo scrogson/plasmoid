@@ -25,6 +25,7 @@ pub struct PlasmoidProtocol {
     peers: Arc<crate::transport::PeerLinks>,
     cluster: Arc<crate::cluster::Cluster>,
     partitions: Arc<crate::partitions::Partitions>,
+    global: Arc<crate::global::GlobalNames>,
 }
 
 impl PlasmoidProtocol {
@@ -35,6 +36,7 @@ impl PlasmoidProtocol {
         peers: Arc<crate::transport::PeerLinks>,
         cluster: Arc<crate::cluster::Cluster>,
         partitions: Arc<crate::partitions::Partitions>,
+        global: Arc<crate::global::GlobalNames>,
     ) -> Self {
         Self {
             registry,
@@ -43,6 +45,7 @@ impl PlasmoidProtocol {
             peers,
             cluster,
             partitions,
+            global,
         }
     }
 }
@@ -57,6 +60,9 @@ impl iroh::protocol::ProtocolHandler for PlasmoidProtocol {
         // tell it who else we know so the mesh converges from one introduction.
         if !self.cluster.learn([remote]).await.is_empty() {
             announce_to(&self.cluster, &self.peers, &[remote]).await;
+            // Every connection is a merge (#31), so this is also where two name
+            // tables reconcile -- whether or not we have met this node before.
+            crate::global::sync_with_all(&self.global, &self.registry, [remote]);
         }
 
         loop {
@@ -71,15 +77,9 @@ impl iroh::protocol::ProtocolHandler for PlasmoidProtocol {
                         }
                     };
 
-                    let registry = self.registry.clone();
-                    let engine = self.engine.clone();
-                    let endpoint = self.endpoint.clone();
-                    let peers = self.peers.clone();
-
+                    let node = self.clone();
                     tokio::spawn(async move {
-                        if let Err(e) =
-                            handle_stream(send, recv, registry, engine, endpoint, peers).await
-                        {
+                        if let Err(e) = handle_stream(send, recv, node).await {
                             tracing::error!(error = %e, "Stream handler error");
                         }
                     });
@@ -98,9 +98,12 @@ impl iroh::protocol::ProtocolHandler for PlasmoidProtocol {
                     let peers = self.peers.clone();
                     let cluster = self.cluster.clone();
                     let partitions = self.partitions.clone();
+                    let global = self.global.clone();
                     tokio::spawn(async move {
-                        if let Err(e) =
-                            handle_message_link(recv, registry, peers, cluster, partitions).await
+                        if let Err(e) = handle_message_link(
+                            recv, registry, peers, cluster, partitions, global,
+                        )
+                        .await
                         {
                             tracing::debug!(error = %e, "Peer link ended");
                         }
@@ -116,10 +119,7 @@ impl iroh::protocol::ProtocolHandler for PlasmoidProtocol {
 async fn handle_stream(
     mut send: iroh::endpoint::SendStream,
     mut recv: iroh::endpoint::RecvStream,
-    registry: Arc<ParticleRegistry>,
-    engine: Engine,
-    endpoint: Endpoint,
-    peers: Arc<crate::transport::PeerLinks>,
+    node: PlasmoidProtocol,
 ) -> anyhow::Result<()> {
     let request_bytes = recv.read_to_end(1024 * 1024).await?;
 
@@ -133,8 +133,14 @@ async fn handle_stream(
     };
 
     let result = match command {
-        Command::Send(request) => handle_send(request, registry).await,
-        Command::Spawn(request) => handle_spawn(request, registry, engine, endpoint, peers).await,
+        Command::Send(request) => handle_send(request, node.registry.clone()).await,
+        Command::Spawn(request) => handle_spawn(request, node.clone()).await,
+        // Sync is the one step the responder cannot answer from the table
+        // alone: it merges as well as replies, and merging can kill (#31).
+        Command::Global(crate::wire::GlobalRequest::Sync { names }) => CommandResponse::Global(
+            crate::global::answer_sync(&node.global, &node.registry, names).await,
+        ),
+        Command::Global(request) => CommandResponse::Global(node.global.apply(request).await),
     };
 
     let response_bytes = serialize(&result)?;
@@ -171,13 +177,16 @@ async fn handle_send(request: SendRequest, registry: Arc<ParticleRegistry>) -> C
     }
 }
 
-async fn handle_spawn(
-    request: SpawnRequest,
-    registry: Arc<ParticleRegistry>,
-    engine: Engine,
-    endpoint: Endpoint,
-    peers: Arc<crate::transport::PeerLinks>,
-) -> CommandResponse {
+async fn handle_spawn(request: SpawnRequest, node: PlasmoidProtocol) -> CommandResponse {
+    let PlasmoidProtocol {
+        registry,
+        engine,
+        endpoint,
+        peers,
+        cluster,
+        global,
+        ..
+    } = node;
     tracing::debug!(
         component = %request.component,
         name = ?request.name,
@@ -225,6 +234,8 @@ async fn handle_spawn(
             registry: registry.clone(),
             endpoint: Some(endpoint),
             peers: Some(peers.clone()),
+            cluster: Some(cluster.clone()),
+            global: Some(global.clone()),
         },
     )
     .await
@@ -255,9 +266,10 @@ async fn handle_message_link(
     peers: Arc<crate::transport::PeerLinks>,
     cluster: Arc<crate::cluster::Cluster>,
     partitions: Arc<crate::partitions::Partitions>,
+    global: Arc<crate::global::GlobalNames>,
 ) -> anyhow::Result<()> {
     while let Some(msg) = read_frame(&mut recv).await? {
-        handle_peer_message(msg, &registry, &peers, &cluster, &partitions).await;
+        handle_peer_message(msg, &registry, &peers, &cluster, &partitions, &global).await;
     }
     Ok(())
 }
@@ -272,6 +284,7 @@ async fn handle_peer_message(
     peers: &Arc<crate::transport::PeerLinks>,
     cluster: &Arc<crate::cluster::Cluster>,
     partitions: &Arc<crate::partitions::Partitions>,
+    global: &Arc<crate::global::GlobalNames>,
 ) {
     async fn resolve(registry: &Arc<ParticleRegistry>, a: &Addressee) -> Option<Pid> {
         match a {
@@ -288,6 +301,7 @@ async fn handle_peer_message(
             if !learned.is_empty() {
                 tracing::info!(count = learned.len(), "Learned of new cluster members");
                 announce_to(cluster, peers, &learned).await;
+                crate::global::sync_with_all(global, registry, learned);
             }
         }
         PeerMessage::Deliver(envelope) => {

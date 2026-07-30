@@ -9,7 +9,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// (8 hex chars) of the EndpointId and `seq` is a monotonically increasing
 /// sequence number. Self-routing: you can determine which node to contact
 /// from the PID alone.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Ordered by `(node, seq)`, which is what makes a global name conflict
+/// resolvable without coordination: every node computes the same `min(pid)`
+/// alone, so no arbiter has to be chosen and no verdict has to be handed over
+/// (#28, #31). Erlang picks its winner at random and must therefore designate
+/// one side to decide; this is the divergence that buys the simplification.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Pid {
     pub node: EndpointId,
     pub seq: u64,
