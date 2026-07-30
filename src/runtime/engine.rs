@@ -30,6 +30,8 @@ pub struct Runtime {
     registry: Arc<ParticleRegistry>,
     peers: Arc<crate::transport::PeerLinks>,
     cluster: Arc<crate::cluster::Cluster>,
+    #[allow(dead_code)]
+    partitions: Arc<crate::partitions::Partitions>,
 }
 
 /// Load or generate a secret key from a data directory.
@@ -128,6 +130,7 @@ impl Runtime {
 
         let peers = Arc::new(crate::transport::PeerLinks::new(endpoint.clone()));
         let cluster = Arc::new(crate::cluster::Cluster::new(endpoint.id()));
+        let partitions = Arc::new(crate::partitions::Partitions::new(endpoint.id()));
 
         let protocol = PlasmoidProtocol::new(
             registry.clone(),
@@ -135,9 +138,11 @@ impl Runtime {
             endpoint.clone(),
             peers.clone(),
             cluster.clone(),
+            partitions.clone(),
         );
 
         crate::cluster_reactor::spawn_membership_reactor(cluster.clone(), peers.clone());
+        crate::partitions::spawn_loss_reporter(cluster.clone(), peers.clone(), partitions.clone());
         crate::signals::spawn_signal_forwarder(registry.clone(), peers.clone());
         crate::signals::spawn_node_loss_reactor(registry.clone(), peers.clone());
 
@@ -154,6 +159,7 @@ impl Runtime {
             registry,
             peers,
             cluster,
+            partitions,
         })
     }
 

@@ -113,6 +113,22 @@ pub enum PeerMessage {
         ref_id: u64,
         reason: ExitReason,
     },
+    /// `reporter` lost its connection to `lost`, and is telling everyone (#33).
+    ///
+    /// Flooded rather than sent once: a receiver that has not seen it before
+    /// passes it on, so the news survives losing the reporter mid-broadcast.
+    /// `op_id` is the reporter's monotonic counter, which distinguishes a
+    /// *later* loss between the same pair from a repeat of this one.
+    LostConnection {
+        reporter: EndpointId,
+        lost: EndpointId,
+        op_id: u64,
+    },
+    /// "Drop me." Sent to the node being disconnected from, so both sides tear
+    /// the link down without either treating it as a fresh loss to report.
+    RemoveConnection {
+        from: EndpointId,
+    },
 }
 
 /// Frames are length-prefixed so many can share one stream.
@@ -196,6 +212,23 @@ impl PeerLinks {
         // dropped — indistinguishable from any other delivery failure.
         let _ = link.frames.send(frame);
         Ok(())
+    }
+
+    /// Tear down the link to a peer on purpose (#33).
+    ///
+    /// Dropping the queue stops the writer task. The loss is then announced
+    /// immediately rather than waited for: the QUIC connection may linger until
+    /// it idles out, and until `PeerLoss` fires, [#17] has not torn down the
+    /// relationships crossing to this node. A deliberate removal that left links
+    /// and monitors intact for a minute would be a departure in name only.
+    ///
+    /// Announcing the loss is safe against a loop because the caller quarantines
+    /// the node *first*, and a quarantined node's loss is never re-reported.
+    ///
+    /// [#17]: https://github.com/scrogson/plasmoid/issues/17
+    pub fn disconnect(&self, node: EndpointId) {
+        self.links.lock().unwrap().remove(&node);
+        self.loss.announce_lost(node);
     }
 
     /// Get the queue for a peer, starting its writer task if this is the first

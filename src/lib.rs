@@ -4,6 +4,7 @@ pub mod cluster_reactor;
 pub mod host;
 pub mod mailbox;
 pub mod message;
+pub mod partitions;
 pub mod pid;
 pub mod policy;
 pub mod protocol;

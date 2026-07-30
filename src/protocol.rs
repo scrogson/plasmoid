@@ -24,6 +24,7 @@ pub struct PlasmoidProtocol {
     endpoint: Endpoint,
     peers: Arc<crate::transport::PeerLinks>,
     cluster: Arc<crate::cluster::Cluster>,
+    partitions: Arc<crate::partitions::Partitions>,
 }
 
 impl PlasmoidProtocol {
@@ -33,6 +34,7 @@ impl PlasmoidProtocol {
         endpoint: Endpoint,
         peers: Arc<crate::transport::PeerLinks>,
         cluster: Arc<crate::cluster::Cluster>,
+        partitions: Arc<crate::partitions::Partitions>,
     ) -> Self {
         Self {
             registry,
@@ -40,6 +42,7 @@ impl PlasmoidProtocol {
             endpoint,
             peers,
             cluster,
+            partitions,
         }
     }
 }
@@ -94,8 +97,11 @@ impl iroh::protocol::ProtocolHandler for PlasmoidProtocol {
                     let registry = self.registry.clone();
                     let peers = self.peers.clone();
                     let cluster = self.cluster.clone();
+                    let partitions = self.partitions.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_message_link(recv, registry, peers, cluster).await {
+                        if let Err(e) =
+                            handle_message_link(recv, registry, peers, cluster, partitions).await
+                        {
                             tracing::debug!(error = %e, "Peer link ended");
                         }
                     });
@@ -248,9 +254,10 @@ async fn handle_message_link(
     registry: Arc<ParticleRegistry>,
     peers: Arc<crate::transport::PeerLinks>,
     cluster: Arc<crate::cluster::Cluster>,
+    partitions: Arc<crate::partitions::Partitions>,
 ) -> anyhow::Result<()> {
     while let Some(msg) = read_frame(&mut recv).await? {
-        handle_peer_message(msg, &registry, &peers, &cluster).await;
+        handle_peer_message(msg, &registry, &peers, &cluster, &partitions).await;
     }
     Ok(())
 }
@@ -264,6 +271,7 @@ async fn handle_peer_message(
     registry: &Arc<ParticleRegistry>,
     peers: &Arc<crate::transport::PeerLinks>,
     cluster: &Arc<crate::cluster::Cluster>,
+    partitions: &Arc<crate::partitions::Partitions>,
 ) {
     async fn resolve(registry: &Arc<ParticleRegistry>, a: &Addressee) -> Option<Pid> {
         match a {
@@ -357,6 +365,19 @@ async fn handle_peer_message(
             reason,
         } => {
             registry.deliver_down(&to, &from, ref_id, reason).await;
+        }
+        PeerMessage::LostConnection {
+            reporter,
+            lost,
+            op_id,
+        } => {
+            crate::partitions::on_lost_connection(
+                reporter, lost, op_id, cluster, peers, partitions,
+            )
+            .await;
+        }
+        PeerMessage::RemoveConnection { from } => {
+            crate::partitions::on_remove_connection(from, cluster, peers).await;
         }
     }
 }
