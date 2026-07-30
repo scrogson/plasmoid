@@ -32,8 +32,8 @@ async fn test_one_introduction_converges_a_full_mesh() {
 
     // B is introduced to A. C is introduced to A only -- it is never told about
     // B. If the mesh is transitive, B and C must still find each other.
-    b.join(a.node_id()).await;
-    c.join(a.node_id()).await;
+    b.join_at(a.endpoint().addr()).await;
+    c.join_at(a.endpoint().addr()).await;
 
     let converged = eventually("B and C to find each other via A", || async {
         b.nodes().await.contains(&c.node_id()) && c.nodes().await.contains(&b.node_id())
@@ -66,7 +66,7 @@ async fn test_a_lost_node_leaves_the_cluster() {
     let a = Runtime::with_node_timeout(None, t).await.unwrap();
     let b = Runtime::with_node_timeout(None, t).await.unwrap();
 
-    b.join(a.node_id()).await;
+    b.join_at(a.endpoint().addr()).await;
     let joined = eventually("A to see B", || async {
         a.nodes().await.contains(&b.node_id())
     })

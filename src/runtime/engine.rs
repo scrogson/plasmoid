@@ -135,6 +135,7 @@ impl Runtime {
         let global = Arc::new(crate::global::GlobalNames::new(
             endpoint.id(),
             endpoint.clone(),
+            peers.clone(),
         ));
 
         let protocol = PlasmoidProtocol::new(
@@ -264,6 +265,21 @@ impl Runtime {
         self.cluster.nodes().await
     }
 
+    /// Introduce this node to a cluster via one of its members, by address.
+    ///
+    /// Preferred over [`Self::join`]: an address can be dialled immediately,
+    /// whereas a bare id must first be found by an address-lookup service.
+    /// Publishing to pkarr/DNS takes seconds after binding and mDNS needs
+    /// multicast the host may not permit, so joining by id can stall or fail
+    /// where joining by address simply works.
+    pub async fn join_at(&self, peer: iroh::EndpointAddr) {
+        let id = peer.id;
+        self.peers.remember(peer);
+        self.cluster.learn([id]).await;
+        crate::protocol::announce_to(&self.cluster, &self.peers, &[id]).await;
+        crate::global::sync_with_all(&self.global, &self.registry, [id]);
+    }
+
     /// Introduce this node to a cluster via one of its members.
     ///
     /// One introduction is enough: the mesh is transitive, so this node learns
@@ -277,6 +293,19 @@ impl Runtime {
     /// The cluster-wide name table.
     pub fn global(&self) -> &Arc<crate::global::GlobalNames> {
         &self.global
+    }
+
+    /// Teach two nodes how to reach each other, without either joining.
+    ///
+    /// Stands in for what an address-lookup service does in production. Tests
+    /// need it because discovery is ambient and slow: pkarr/DNS publishes an
+    /// empty address set for several seconds after binding, and mDNS needs
+    /// multicast that a host may not permit. Depending on either would make
+    /// every cross-node test a network test.
+    #[doc(hidden)]
+    pub fn knows(&self, other: &Runtime) {
+        self.peers.remember(other.endpoint().addr());
+        other.peers.remember(self.endpoint().addr());
     }
 
     #[doc(hidden)]

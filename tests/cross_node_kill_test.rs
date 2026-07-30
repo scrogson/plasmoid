@@ -14,10 +14,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 async fn two_nodes() -> (Runtime, Runtime) {
-    (
+    let (a, b) = (
         Runtime::new(None).await.unwrap(),
         Runtime::new(None).await.unwrap(),
-    )
+    );
+    a.knows(&b);
+    (a, b)
 }
 
 /// A particle that traps exits — the one a directed kill must still take down.

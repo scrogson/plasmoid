@@ -10,10 +10,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 async fn two_nodes() -> (Runtime, Runtime) {
-    (
+    let (a, b) = (
         Runtime::new(None).await.unwrap(),
         Runtime::new(None).await.unwrap(),
-    )
+    );
+    a.knows(&b);
+    (a, b)
 }
 
 /// Two nodes that notice each other's absence quickly.
@@ -23,10 +25,12 @@ async fn two_nodes() -> (Runtime, Runtime) {
 /// asks for a short one — which is why the window is configurable at all.
 async fn two_impatient_nodes() -> (Runtime, Runtime) {
     let t = Duration::from_secs(3);
-    (
+    let (a, b) = (
         Runtime::with_node_timeout(None, t).await.unwrap(),
         Runtime::with_node_timeout(None, t).await.unwrap(),
-    )
+    );
+    a.knows(&b);
+    (a, b)
 }
 
 async fn place(node: &Runtime, mailbox: Arc<Mailbox>) -> Pid {
@@ -55,6 +59,7 @@ async fn test_linking_to_a_missing_remote_particle_yields_noproc() {
     // return -- it arrives as an exit signal, through the same channel the
     // target's later death would have used.
     let peers = PeerLinks::new(a.endpoint().clone());
+    peers.remember(b.endpoint().addr());
     peers
         .send(
             b.node_id(),
@@ -85,6 +90,7 @@ async fn test_monitoring_a_missing_remote_particle_yields_noproc() {
     let watcher = place(&a, inbox.clone()).await;
 
     let peers = PeerLinks::new(a.endpoint().clone());
+    peers.remember(b.endpoint().addr());
     peers
         .send(
             b.node_id(),

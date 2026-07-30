@@ -25,7 +25,7 @@ use crate::pid::Pid;
 use crate::runtime::PLASMOID_ALPN;
 use crate::wire;
 use anyhow::{Context, Result};
-use iroh::{Endpoint, EndpointId};
+use iroh::{Endpoint, EndpointAddr, EndpointId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -65,8 +65,14 @@ pub enum PeerMessage {
     /// Sent when a link is established and whenever the sender learns of a node
     /// the recipient may not know. Carrying the whole roster is what makes the
     /// mesh transitive: one introduction converges the cluster (#26).
+    ///
+    /// Carries **addresses**, not bare ids. A node learned transitively is only
+    /// useful if it can also be reached, and resolving an id back to an address
+    /// means waiting on pkarr/DNS or mDNS — slow where it works, unavailable
+    /// where it does not. Passing on what we already know makes the mesh
+    /// converge without any lookup service at all.
     Announce {
-        nodes: Vec<EndpointId>,
+        nodes: Vec<EndpointAddr>,
     },
     /// `from` (on the sending node) wants to link to `to` (on the receiving one).
     Link {
@@ -180,6 +186,15 @@ pub struct PeerLinks {
     /// A std mutex on purpose: only ever held to look up or insert a queue
     /// handle, never across an await, so senders cannot be parked here.
     links: Mutex<HashMap<EndpointId, Arc<PeerLink>>>,
+    /// Addresses we have been told, so dialling need not wait on discovery.
+    ///
+    /// Dialling a bare `EndpointId` requires an address-lookup service to have
+    /// published *and* resolved us — pkarr/DNS on the open internet, or mDNS on
+    /// a LAN. Both take seconds and either can be unavailable: macOS gates the
+    /// multicast mDNS needs, and a freshly bound endpoint publishes an empty
+    /// address set until it has finished probing. Dialling a known
+    /// [`EndpointAddr`] needs none of that and works immediately.
+    known: Mutex<HashMap<EndpointId, EndpointAddr>>,
 }
 
 impl std::fmt::Debug for PeerLinks {
@@ -194,6 +209,7 @@ impl PeerLinks {
             endpoint,
             loss: Arc::new(PeerLoss::new()),
             links: Mutex::new(HashMap::new()),
+            known: Mutex::new(HashMap::new()),
         }
     }
 
@@ -212,6 +228,67 @@ impl PeerLinks {
         // dropped — indistinguishable from any other delivery failure.
         let _ = link.frames.send(frame);
         Ok(())
+    }
+
+    /// Record how to reach a peer, so we never have to discover it.
+    ///
+    /// Addresses only ever accumulate detail here; an entry with no addresses
+    /// is not allowed to replace a useful one, since `Endpoint::addr` reports an
+    /// empty set until probing finishes.
+    pub fn remember(&self, addr: EndpointAddr) {
+        if addr.addrs.is_empty() {
+            return;
+        }
+        self.known.lock().unwrap().insert(addr.id, addr);
+    }
+
+    /// Remember the path a peer reached *us* on.
+    ///
+    /// A node that dials us must be answerable straight away — `accept` replies
+    /// with an `Announce`, and without this that reply would have to discover
+    /// the very peer already talking to us.
+    pub fn remember_incoming(&self, id: EndpointId, addr: iroh::endpoint::IncomingAddr) {
+        use iroh::endpoint::IncomingAddr;
+        let transport = match addr {
+            IncomingAddr::Ip(sa) => iroh::TransportAddr::Ip(sa),
+            IncomingAddr::Relay { url, .. } => iroh::TransportAddr::Relay(url),
+            // A custom transport is not something we can reconstruct a dial
+            // from; fall back to discovery for that peer.
+            _ => return,
+        };
+        let mut known = self.known.lock().unwrap();
+        known
+            .entry(id)
+            .and_modify(|a| {
+                a.addrs.insert(transport.clone());
+            })
+            .or_insert_with(|| EndpointAddr::from_parts(id, [transport]));
+    }
+
+    /// How others should reach us.
+    pub fn our_addr(&self) -> EndpointAddr {
+        self.endpoint.addr()
+    }
+
+    /// How to dial a node: a known address if we have one, else the bare id.
+    ///
+    /// Every dial in the runtime goes through this, so that learning an address
+    /// once benefits messaging, remote spawn and the global-name protocol
+    /// alike. A bare id is a request for an address-lookup service to find the
+    /// peer, which is the slow path and may be unavailable entirely.
+    pub fn dial_target(&self, node: EndpointId) -> EndpointAddr {
+        self.known
+            .lock()
+            .unwrap()
+            .get(&node)
+            .cloned()
+            .unwrap_or_else(|| node.into())
+    }
+
+    /// Everything we know about how to reach the given peers.
+    pub fn addrs_for(&self, nodes: &[EndpointId]) -> Vec<EndpointAddr> {
+        let known = self.known.lock().unwrap();
+        nodes.iter().filter_map(|n| known.get(n).cloned()).collect()
     }
 
     /// Tear down the link to a peer on purpose (#33).
@@ -244,9 +321,11 @@ impl PeerLinks {
         links.insert(node, link.clone());
         drop(links);
 
+        let dial = Some(self.dial_target(node));
         tokio::spawn(write_to_peer(
             self.endpoint.clone(),
             node,
+            dial,
             rx,
             self.loss.clone(),
         ));
@@ -261,6 +340,7 @@ impl PeerLinks {
 async fn write_to_peer(
     endpoint: Endpoint,
     node: EndpointId,
+    dial: Option<EndpointAddr>,
     mut frames: mpsc::UnboundedReceiver<Vec<u8>>,
     loss: Arc<PeerLoss>,
 ) {
@@ -271,11 +351,18 @@ async fn write_to_peer(
         // last write, and reconnecting once is enough to tell.
         for attempt in 0..2 {
             if stream.is_none() {
-                match open_link(&endpoint, node, &loss).await {
+                match open_link(&endpoint, node, dial.clone(), &loss).await {
                     Ok(s) => stream = Some(s),
                     Err(e) => {
+                        // Deliberately *not* announced as a loss. Failing to
+                        // reach a peer we have never reached is not the peer
+                        // dying -- a freshly bound endpoint is undiscoverable
+                        // for seconds. Since #33 a reported loss ejects the node
+                        // from every member's cluster and quarantines it, so
+                        // treating a slow start as a death would eject nodes
+                        // that were merely new. A peer that was connected and
+                        // then went away is caught by `Connection::closed`.
                         tracing::debug!(peer = %node.fmt_short(), error = %e, "Could not reach peer; message dropped");
-                        loss.announce_lost(node);
                         break;
                     }
                 }
@@ -302,10 +389,14 @@ async fn write_to_peer(
 async fn open_link(
     endpoint: &Endpoint,
     node: EndpointId,
+    dial: Option<EndpointAddr>,
     loss: &Arc<PeerLoss>,
 ) -> Result<iroh::endpoint::SendStream> {
+    // Prefer a known address. Falling back to the bare id means asking a lookup
+    // service to find the peer, which is slower and may be unavailable.
+    let target = dial.unwrap_or_else(|| node.into());
     let conn = endpoint
-        .connect(node, PLASMOID_ALPN)
+        .connect(target, PLASMOID_ALPN)
         .await
         .context("failed to connect to peer")?;
     let stream = conn.open_uni().await.context("failed to open peer link")?;

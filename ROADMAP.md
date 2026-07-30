@@ -27,7 +27,7 @@ See [`CONTEXT.md`](./CONTEXT.md) for vocabulary — a *particle* is a running WA
 
 **Transport and operations.**
 
-- Nodes form a peer-to-peer QUIC mesh over iroh, with mDNS discovery on the local network and n0 relay fallback. Node identity is an Ed25519 keypair, stable across restarts.
+- Nodes form a peer-to-peer QUIC mesh over iroh, with mDNS discovery on the local network and n0 relay fallback. Node identity is an Ed25519 keypair, stable across restarts. **Discovery is a fallback, not a dependency**: `--peer` and `Announce` carry full addresses, so a cluster forms without any lookup service.
 - All Plasmoid traffic uses a single ALPN, `plasmoid/1`.
 - **Node loss fires every crossing relationship.** The QUIC idle timeout decides (default 60s, configurable), and each link and monitor fires individually with reason `noconnection` — so a lost node is indistinguishable in shape from the particles on it dying separately.
 - **Nodes form a cluster.** A node introduced to one member (`--peer <node-id>`) learns the rest and they learn it — a transitive full mesh, as in Erlang. Membership *is* connectivity: connecting is joining, and a node leaves by the same signal that fires its links.

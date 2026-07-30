@@ -11,10 +11,12 @@ use std::time::Duration;
 const ECHO_WASM: &str = "components/echo/target/wasm32-wasip1/release/echo.wasm";
 
 async fn two_nodes() -> (Runtime, Runtime) {
-    (
+    let (a, b) = (
         Runtime::new(None).await.unwrap(),
         Runtime::new(None).await.unwrap(),
-    )
+    );
+    a.knows(&b);
+    (a, b)
 }
 
 #[tokio::test]
@@ -28,6 +30,7 @@ async fn test_a_named_destination_is_resolved_on_the_receiving_node() {
     b.registry().register_name(&pid, "counter").await.unwrap();
 
     let peers = PeerLinks::new(a.endpoint().clone());
+    peers.remember(b.endpoint().addr());
     peers
         .send(
             b.node_id(),
@@ -50,6 +53,7 @@ async fn test_an_unregistered_name_is_dropped_not_errored() {
     let (a, b) = two_nodes().await;
 
     let peers = PeerLinks::new(a.endpoint().clone());
+    peers.remember(b.endpoint().addr());
     peers
         .send(
             b.node_id(),

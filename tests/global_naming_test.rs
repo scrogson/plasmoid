@@ -33,7 +33,7 @@ async fn test_a_claim_is_visible_on_every_node() {
     // The table is replicated (#33), so a name claimed anywhere is readable
     // everywhere -- that is what makes global-lookup a local hashmap read.
     let (a, b) = two_nodes().await;
-    a.join(b.node_id()).await;
+    a.join_at(b.endpoint().addr()).await;
     assert!(eventually(async || !a.nodes().await.is_empty()).await);
 
     let pid = a
@@ -58,7 +58,7 @@ async fn test_a_second_claimant_is_refused_without_anything_dying() {
     // loser gets a plain error. This is the case Erlang answers with `no`, and
     // it is deliberately NOT the case where somebody gets killed (#28).
     let (a, b) = two_nodes().await;
-    a.join(b.node_id()).await;
+    a.join_at(b.endpoint().addr()).await;
     assert!(eventually(async || !a.nodes().await.is_empty()).await);
 
     let first = a
@@ -177,7 +177,7 @@ async fn test_merging_two_claims_kills_the_higher_pid() {
     };
 
     // Now they meet. Every connection is a merge (#31).
-    a.join(b.node_id()).await;
+    a.join_at(b.endpoint().addr()).await;
 
     assert!(
         eventually(async || !loser_node.registry().particle_exists(&loser).await).await,
@@ -211,7 +211,7 @@ async fn test_a_merge_of_identical_claims_kills_nothing() {
     // B already knows the same name for the same pid.
     b.global().commit("agreed", pid.clone()).await;
 
-    a.join(b.node_id()).await;
+    a.join_at(b.endpoint().addr()).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     assert!(

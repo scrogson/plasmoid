@@ -85,6 +85,9 @@ pub enum LookupError {
 pub struct GlobalNames {
     me: EndpointId,
     endpoint: Endpoint,
+    /// Consulted only for its address book, so the lock protocol dials the
+    /// same way messaging does rather than falling back to discovery.
+    peers: Arc<crate::transport::PeerLinks>,
     /// The table itself. Every node holds the whole thing (#33).
     names: RwLock<HashMap<String, Pid>>,
     /// Names currently being claimed, and by which node.
@@ -100,10 +103,15 @@ impl std::fmt::Debug for GlobalNames {
 }
 
 impl GlobalNames {
-    pub fn new(me: EndpointId, endpoint: Endpoint) -> Self {
+    pub fn new(
+        me: EndpointId,
+        endpoint: Endpoint,
+        peers: Arc<crate::transport::PeerLinks>,
+    ) -> Self {
         Self {
             me,
             endpoint,
+            peers,
             names: RwLock::new(HashMap::new()),
             locks: RwLock::new(HashMap::new()),
             merges: watch::channel(0).0,
@@ -364,7 +372,10 @@ impl GlobalNames {
         node: EndpointId,
         req: GlobalRequest,
     ) -> anyhow::Result<GlobalResponse> {
-        let conn = self.endpoint.connect(node, PLASMOID_ALPN).await?;
+        let conn = self
+            .endpoint
+            .connect(self.peers.dial_target(node), PLASMOID_ALPN)
+            .await?;
         let (mut send, mut recv) = conn.open_bi().await?;
         send.write_all(&wire::serialize(&Command::Global(req))?)
             .await?;
@@ -576,7 +587,8 @@ mod tests {
             .bind()
             .await
             .unwrap();
-        Arc::new(GlobalNames::new(me, endpoint))
+        let peers = Arc::new(crate::transport::PeerLinks::new(endpoint.clone()));
+        Arc::new(GlobalNames::new(me, endpoint, peers))
     }
 
     #[tokio::test]

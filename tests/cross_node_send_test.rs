@@ -13,6 +13,7 @@ use std::time::Duration;
 async fn two_nodes() -> (Runtime, Runtime) {
     let a = Runtime::new(None).await.unwrap();
     let b = Runtime::new(None).await.unwrap();
+    a.knows(&b);
     (a, b)
 }
 
@@ -30,6 +31,7 @@ async fn test_message_reaches_a_particle_on_another_node() {
     assert!(!target.is_local_to(&a.node_id()), "target must be remote");
 
     let peers = PeerLinks::new(a.endpoint().clone());
+    peers.remember(b.endpoint().addr());
     peers
         .send(
             target.node,
@@ -55,6 +57,7 @@ async fn test_cross_node_messages_arrive_in_send_order() {
     let target = place_particle(&b, inbox.clone()).await;
 
     let peers = PeerLinks::new(a.endpoint().clone());
+    peers.remember(b.endpoint().addr());
 
     // A burst large enough that any per-message stream or spawned handler would
     // interleave. This is the guarantee from #14, and the reason a single
@@ -92,6 +95,7 @@ async fn test_tagged_messages_cross_the_boundary_too() {
     let target = place_particle(&b, inbox.clone()).await;
 
     let peers = PeerLinks::new(a.endpoint().clone());
+    peers.remember(b.endpoint().addr());
     peers
         .send(
             target.node,
@@ -125,6 +129,7 @@ async fn test_sending_to_a_dead_remote_particle_is_silently_dropped() {
         seq: u64::MAX,
     };
     let peers = PeerLinks::new(a.endpoint().clone());
+    peers.remember(b.endpoint().addr());
     peers
         .send(
             ghost.node,

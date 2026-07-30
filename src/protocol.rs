@@ -295,13 +295,33 @@ async fn handle_peer_message(
 
     match msg {
         PeerMessage::Announce { nodes } => {
+            // Remember how to reach them before recording membership: a member
+            // we cannot dial is worse than one we have not learned yet.
+            for addr in &nodes {
+                peers.remember(addr.clone());
+            }
+            let announced: Vec<iroh::EndpointId> = nodes.iter().map(|a| a.id).collect();
+
             // Announce onward only when we learned something, or announcements
             // would circulate forever between peers that already agree.
-            let learned = cluster.learn(nodes).await;
+            let learned = cluster.learn(announced.iter().copied()).await;
             if !learned.is_empty() {
                 tracing::info!(count = learned.len(), "Learned of new cluster members");
                 announce_to(cluster, peers, &learned).await;
                 crate::global::sync_with_all(global, registry, learned);
+            }
+
+            // Answer the sender if our roster holds anything theirs did not.
+            // The sender named everything it knows, so this terminates as soon
+            // as the two rosters agree -- and it is what converges the mesh now
+            // that a node cannot reply from `accept` before it knows an address
+            // to reply to.
+            if let Some(sender) = announced.first().copied() {
+                let mine = cluster.nodes().await;
+                let missing = mine.iter().any(|n| *n != sender && !announced.contains(n));
+                if missing {
+                    announce_to(cluster, peers, &[sender]).await;
+                }
             }
         }
         PeerMessage::Deliver(envelope) => {
@@ -408,7 +428,11 @@ pub(crate) async fn announce_to(
     let roster = cluster.nodes().await;
     for node in to {
         // Do not name the recipient to itself; it is not its own peer.
-        let nodes: Vec<_> = roster.iter().copied().filter(|n| n != node).collect();
+        let others: Vec<_> = roster.iter().copied().filter(|n| n != node).collect();
+        // Our own address goes first: the recipient may know nothing about us,
+        // and an introduction that cannot be answered is no introduction.
+        let mut nodes = vec![peers.our_addr()];
+        nodes.extend(peers.addrs_for(&others));
         if let Err(e) = peers.send(*node, &PeerMessage::Announce { nodes }) {
             tracing::debug!(peer = %node.fmt_short(), error = %e, "Announce dropped");
         }

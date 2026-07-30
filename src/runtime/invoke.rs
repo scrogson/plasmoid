@@ -1079,7 +1079,12 @@ pub(crate) async fn remote_spawn(
         return local_spawn(ctx, &component, name.as_deref(), &init_args).await;
     }
 
-    let client = crate::client::NodeClient::new(endpoint, node_id);
+    // Dial a known address when we have one; a bare id needs discovery.
+    let target = match ctx.peers.as_ref() {
+        Some(peers) => peers.dial_target(node_id),
+        None => node_id.into(),
+    };
+    let client = crate::client::NodeClient::new(endpoint, target);
     match client
         .try_spawn(&component, name.as_deref(), &init_args)
         .await

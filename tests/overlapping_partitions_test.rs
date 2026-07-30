@@ -37,8 +37,8 @@ async fn test_a_reported_loss_ejects_the_node_reported_lost() {
     // ever being what did it.
     let b = Runtime::new(None).await.unwrap();
     let b_id = b.node_id();
-    c.join(a.node_id()).await;
-    c.join(b_id).await;
+    c.join_at(a.endpoint().addr()).await;
+    c.join_at(b.endpoint().addr()).await;
     assert!(
         eventually(async || c.nodes().await.len() == 2).await,
         "C should start out clustered with both"
@@ -75,11 +75,12 @@ async fn test_both_endpoints_are_ejected_when_both_report() {
     let b = Runtime::new(None).await.unwrap();
     let (a_id, b_id) = (a.node_id(), b.node_id());
 
-    c.join(a_id).await;
-    c.join(b_id).await;
+    c.join_at(a.endpoint().addr()).await;
+    c.join_at(b.endpoint().addr()).await;
     assert!(eventually(async || c.nodes().await.len() == 2).await);
 
     let from_a = PeerLinks::new(a.endpoint().clone());
+    from_a.remember(c.endpoint().addr());
     from_a
         .send(
             c.node_id(),
@@ -91,6 +92,7 @@ async fn test_both_endpoints_are_ejected_when_both_report() {
         )
         .unwrap();
     let from_b = PeerLinks::new(b.endpoint().clone());
+    from_b.remember(c.endpoint().addr());
     from_b
         .send(
             c.node_id(),
@@ -121,11 +123,12 @@ async fn test_an_ejected_node_is_not_relearned_from_an_announce() {
     let b = Runtime::new(None).await.unwrap();
     let b_id = b.node_id();
 
-    c.join(a.node_id()).await;
-    c.join(b_id).await;
+    c.join_at(a.endpoint().addr()).await;
+    c.join_at(b.endpoint().addr()).await;
     assert!(eventually(async || c.nodes().await.len() == 2).await);
 
     let from_a = PeerLinks::new(a.endpoint().clone());
+    from_a.remember(c.endpoint().addr());
     from_a
         .send(
             c.node_id(),
@@ -141,7 +144,12 @@ async fn test_an_ejected_node_is_not_relearned_from_an_announce() {
     // Now insist, the way a peer roster would.
     for _ in 0..3 {
         from_a
-            .send(c.node_id(), &PeerMessage::Announce { nodes: vec![b_id] })
+            .send(
+                c.node_id(),
+                &PeerMessage::Announce {
+                    nodes: vec![b.endpoint().addr()],
+                },
+            )
             .unwrap();
     }
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -165,11 +173,12 @@ async fn test_a_repeated_report_does_not_amplify() {
     let b = Runtime::new(None).await.unwrap();
     let b_id = b.node_id();
 
-    c.join(a.node_id()).await;
-    c.join(b_id).await;
+    c.join_at(a.endpoint().addr()).await;
+    c.join_at(b.endpoint().addr()).await;
     assert!(eventually(async || c.nodes().await.len() == 2).await);
 
     let from_a = PeerLinks::new(a.endpoint().clone());
+    from_a.remember(c.endpoint().addr());
     for _ in 0..10 {
         from_a
             .send(
@@ -200,7 +209,7 @@ async fn test_a_node_told_it_was_lost_drops_the_reporter() {
     let c = Runtime::new(None).await.unwrap();
     let a = Runtime::new(None).await.unwrap();
 
-    c.join(a.node_id()).await;
+    c.join_at(a.endpoint().addr()).await;
     assert!(eventually(async || c.nodes().await.len() == 1).await);
 
     PeerLinks::new(a.endpoint().clone())
@@ -227,7 +236,7 @@ async fn test_remove_connection_drops_the_sender() {
     let c = Runtime::new(None).await.unwrap();
     let a = Runtime::new(None).await.unwrap();
 
-    c.join(a.node_id()).await;
+    c.join_at(a.endpoint().addr()).await;
     assert!(eventually(async || c.nodes().await.len() == 1).await);
 
     PeerLinks::new(a.endpoint().clone())
