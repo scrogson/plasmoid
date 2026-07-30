@@ -47,12 +47,13 @@ plasmoid start target/wasm32-wasip1/release/greeter.wasm --spawn greeter --name 
 │  ┌─────────────────────────────────────┐    │
 │  │ Host Functions                      │    │
 │  │ spawn, send, recv, link, monitor,   │    │
-│  │ trap-exit, register, lookup, log    │    │
+│  │ exit-signal, trap-exit, register,   │    │
+│  │ lookup, log                         │    │
 │  └─────────────────────────────────────┘    │
 └─────────────────────────────────────────────┘
 ```
 
-Each particle has an unbounded mailbox and receives messages sequentially — it never handles two at once, so its linear memory needs no locking. Particles can spawn other particles, and `link` / `monitor` / `trap-exit` provide the primitives OTP-style supervision is built from — across nodes as well as within one.
+Each particle has an unbounded mailbox and receives messages sequentially — it never handles two at once, so its linear memory needs no locking. Particles can spawn other particles, and `link` / `monitor` / `trap-exit` / `exit-signal` provide the primitives OTP-style supervision is built from — across nodes as well as within one. A supervisor can stop a child gracefully or, when it will not go, kill it: a `kill` sent as a signal cannot be trapped.
 
 Nodes form a peer-to-peer QUIC mesh with cryptographic identity, discovered over mDNS on the local network with relay fallback. Introducing a node to one cluster member is enough — the mesh is transitive, so it learns the rest and they learn it.
 
@@ -213,7 +214,12 @@ interface host {
         -> result<pid, spawn-error>;       // waits for the target's reply
     spawn-request: func(node: node-id, component: string, name: option<string>, init-args: string)
         -> u64;                            // returns immediately; reply is a message
+
+    // Terminate yourself, unconditionally.
     exit:  func(reason: exit-reason);
+    // Signal another particle, anywhere. `kill` sent this way is untrappable;
+    // `killed` inherited through a link is not. Reports nothing, like `send`.
+    exit-signal: func(dest: destination, reason: exit-reason);
 
     // Messaging
     // fire-and-forget, routed to wherever the destination lives

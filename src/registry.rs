@@ -261,15 +261,20 @@ impl ParticleRegistry {
             .await;
     }
 
-    /// Apply an exit signal arriving from another node, with the same policy a
-    /// local death would get.
+    /// Apply an exit signal *inherited* through a link, when the particle that
+    /// died was on another node.
     ///
     /// Delivering it as a message unconditionally — which is what
     /// [`Self::deliver_exit`] does — is wrong for a non-trapping particle: it
     /// would survive a death that would have killed it had the peer been local.
     /// That makes a remote death distinguishable from a local one, which #21
     /// promised it would not be, and leaves supervision broken across nodes.
-    pub async fn apply_exit_signal(&self, to: &Pid, from: &Pid, reason: ExitReason) {
+    ///
+    /// Every reason is trappable here, `kill` included. A particle that calls
+    /// `exit(kill)` on itself propagates `kill` to its links, and Erlang lets
+    /// them trap it — untrappability belongs to the *sending*, not the reason.
+    /// See [`Self::apply_directed_exit`].
+    pub async fn apply_inherited_exit(&self, to: &Pid, from: &Pid, reason: ExitReason) {
         let trapping = match self.particle_states.read().await.get(to) {
             Some(state) => state.trap_exit,
             None => return, // already gone
@@ -282,6 +287,30 @@ impl ParticleRegistry {
             Box::pin(self.exit_particle(to, reason)).await;
         }
         // Normal and not trapping: no action, as locally.
+    }
+
+    /// Apply an exit signal sent *directly* at a particle, by `exit-signal`.
+    ///
+    /// Identical to [`Self::apply_inherited_exit`] but for `kill`, which is
+    /// untrappable: the target dies with [`ExitReason::Killed`] whether or not
+    /// it traps exits, and its links inherit `killed` — an ordinary reason they
+    /// may trap. Erlang's `exit_signal/2` does exactly this, changing `kill` to
+    /// `killed` "to hint to linked processes that the killed process got killed
+    /// by a call to `exit(Dest, kill)`".
+    ///
+    /// The guarantee matters: #28 resolves a name conflict by killing the loser,
+    /// which is only a resolution if the loser cannot decline. Nothing can make
+    /// itself unkillable, and nothing else gains that power — every other reason
+    /// still goes through `trap-exit`.
+    pub async fn apply_directed_exit(&self, to: &Pid, from: &Pid, reason: ExitReason) {
+        if !matches!(reason, ExitReason::Kill) {
+            self.apply_inherited_exit(to, from, reason).await;
+            return;
+        }
+        if !self.particle_states.read().await.contains_key(to) {
+            return; // already gone
+        }
+        Box::pin(self.exit_particle(to, ExitReason::Killed)).await;
     }
 
     /// Deliver a down signal straight to a local particle's mailbox.
@@ -637,11 +666,14 @@ impl ParticleRegistry {
             remote_monitors,
         });
 
-        // Determine the propagated reason for Kill signals
-        let propagated_reason = match &reason {
-            ExitReason::Kill => ExitReason::Shutdown("killed".to_string()),
-            other => other.clone(),
-        };
+        // The reason propagates to links unchanged, including `kill`.
+        //
+        // It used to be rewritten to `shutdown("killed")`, which reported a
+        // graceful shutdown for a particle that had been killed -- exactly the
+        // distinction a supervisor needs. Erlang draws it the other way round:
+        // the *sender* of a directed kill changes `kill` to `killed`, and what
+        // links inherit is whatever the dead particle actually died of.
+        let propagated_reason = reason.clone();
 
         // Step 2 + 3: Process links
         // We need to collect the peers to cascade-kill outside the lock
@@ -864,7 +896,7 @@ mod tests {
         };
 
         registry
-            .apply_exit_signal(&pid, &remote, ExitReason::Exception("boom".into()))
+            .apply_inherited_exit(&pid, &remote, ExitReason::Exception("boom".into()))
             .await;
 
         assert!(
@@ -884,7 +916,7 @@ mod tests {
         };
 
         registry
-            .apply_exit_signal(&pid, &remote, ExitReason::Exception("boom".into()))
+            .apply_inherited_exit(&pid, &remote, ExitReason::Exception("boom".into()))
             .await;
 
         assert!(
@@ -907,7 +939,7 @@ mod tests {
         };
 
         registry
-            .apply_exit_signal(&pid, &remote, ExitReason::Normal)
+            .apply_inherited_exit(&pid, &remote, ExitReason::Normal)
             .await;
 
         assert!(
@@ -1167,34 +1199,153 @@ mod tests {
         }
     }
 
+    /// Read the reason off the next exit message, or fail.
+    async fn next_exit_reason(mailbox: &Arc<Mailbox>) -> ExitReason {
+        match mailbox.recv(Some(Duration::from_millis(100))).await {
+            Some(crate::mailbox::MailboxMessage::Exit { reason, .. }) => reason,
+            other => panic!("expected an Exit message, got {other:?}"),
+        }
+    }
+
+    /// A `kill` *inherited* through a link is an ordinary, trappable reason.
+    ///
+    /// Erlang: a process that calls `exit(kill)` on itself "will terminate with
+    /// exit reason kill and also emit exit signals with exit reason kill (not
+    /// killed) to all linked processes. Such exit signals ... can be trapped."
     #[tokio::test]
-    async fn test_kill_propagation() {
+    async fn test_an_inherited_kill_is_trappable() {
         let registry = make_registry();
         let (pid_a, _mailbox_a) = spawn_test_particle(&registry).await;
         let (pid_b, mailbox_b) = spawn_test_particle(&registry).await;
 
-        // b traps exits
         registry.set_trap_exit(&pid_b, true).await;
-
-        // Link a and b
         registry.link(&pid_a, &pid_b).await.unwrap();
 
-        // Kill a -- Kill is propagated as Shutdown("killed")
         registry.exit_particle(&pid_a, ExitReason::Kill).await;
 
-        // b should still be alive (trapping)
-        assert!(registry.particle_exists(&pid_b).await);
+        assert!(
+            registry.particle_exists(&pid_b).await,
+            "trapping the signal is what keeps b alive"
+        );
+        assert_eq!(
+            next_exit_reason(&mailbox_b).await,
+            ExitReason::Kill,
+            "the reason reaches links unchanged; it used to be rewritten to \
+             shutdown(\"killed\"), reporting a graceful stop for a killed particle"
+        );
+    }
 
-        // b should have received an Exit with Shutdown("killed")
-        let msg = mailbox_b
-            .recv(Some(Duration::from_millis(100)))
-            .await
-            .unwrap();
-        match msg {
-            crate::mailbox::MailboxMessage::Exit { reason, .. } => {
-                assert_eq!(reason, ExitReason::Shutdown("killed".into()));
-            }
-            other => panic!("expected Exit, got {:?}", other),
-        }
+    /// A `kill` *sent* at a particle bypasses `trap_exit` entirely (#27).
+    ///
+    /// This is the guarantee #28 rests on: killing the loser of a name conflict
+    /// only resolves the conflict if the loser cannot decline.
+    #[tokio::test]
+    async fn test_a_directed_kill_is_untrappable() {
+        let registry = make_registry();
+        let (killer, _) = spawn_test_particle(&registry).await;
+        let (victim, _) = spawn_test_particle(&registry).await;
+
+        registry.set_trap_exit(&victim, true).await;
+
+        registry
+            .apply_directed_exit(&victim, &killer, ExitReason::Kill)
+            .await;
+
+        assert!(
+            !registry.particle_exists(&victim).await,
+            "trapping exits must not survive a directed kill"
+        );
+    }
+
+    /// The killed particle dies as `killed`, and that is what its links inherit.
+    #[tokio::test]
+    async fn test_a_directed_kill_propagates_killed() {
+        let registry = make_registry();
+        let (killer, _) = spawn_test_particle(&registry).await;
+        let (victim, _) = spawn_test_particle(&registry).await;
+        let (watcher, watcher_mailbox) = spawn_test_particle(&registry).await;
+
+        registry.set_trap_exit(&watcher, true).await;
+        registry.link(&victim, &watcher).await.unwrap();
+
+        registry
+            .apply_directed_exit(&victim, &killer, ExitReason::Kill)
+            .await;
+
+        assert_eq!(
+            next_exit_reason(&watcher_mailbox).await,
+            ExitReason::Killed,
+            "kill becomes killed when sent, hinting to links how the particle died"
+        );
+        assert!(
+            registry.particle_exists(&watcher).await,
+            "an inherited killed is trappable like any other reason"
+        );
+    }
+
+    /// Only `kill` is special. Everything else still respects `trap_exit`.
+    #[tokio::test]
+    async fn test_a_directed_shutdown_is_still_trappable() {
+        let registry = make_registry();
+        let (from, _) = spawn_test_particle(&registry).await;
+        let (target, target_mailbox) = spawn_test_particle(&registry).await;
+
+        registry.set_trap_exit(&target, true).await;
+
+        registry
+            .apply_directed_exit(&target, &from, ExitReason::Shutdown("stop".into()))
+            .await;
+
+        assert!(registry.particle_exists(&target).await);
+        assert_eq!(
+            next_exit_reason(&target_mailbox).await,
+            ExitReason::Shutdown("stop".into())
+        );
+    }
+
+    /// A directed `normal` signal is why `exit` and `exit-signal` stay separate.
+    ///
+    /// `exit(normal)` terminates you unconditionally; `exit-signal(self, normal)`
+    /// goes through your own trap rules, so a trapping particle gets a message
+    /// and keeps running. Erlang draws exactly this line between `exit/1` and
+    /// `exit/2`, and collapsing the two would leave no way to say *stop now*.
+    #[tokio::test]
+    async fn test_a_directed_normal_does_not_kill_a_trapping_particle() {
+        let registry = make_registry();
+        let (target, target_mailbox) = spawn_test_particle(&registry).await;
+        registry.set_trap_exit(&target, true).await;
+
+        registry
+            .apply_directed_exit(&target, &target, ExitReason::Normal)
+            .await;
+
+        assert!(
+            registry.particle_exists(&target).await,
+            "a trapping particle survives a normal signal aimed at itself"
+        );
+        assert_eq!(
+            next_exit_reason(&target_mailbox).await,
+            ExitReason::Normal,
+            "and hears about it"
+        );
+
+        // Whereas exit() on the same particle is unconditional.
+        registry.exit_particle(&target, ExitReason::Normal).await;
+        assert!(!registry.particle_exists(&target).await);
+    }
+
+    /// Signalling something already dead is a no-op, and reports nothing.
+    #[tokio::test]
+    async fn test_killing_a_dead_particle_is_a_no_op() {
+        let registry = make_registry();
+        let (from, _) = spawn_test_particle(&registry).await;
+        let (target, _) = spawn_test_particle(&registry).await;
+
+        registry.exit_particle(&target, ExitReason::Normal).await;
+        registry
+            .apply_directed_exit(&target, &from, ExitReason::Kill)
+            .await;
+
+        assert!(!registry.particle_exists(&target).await);
     }
 }

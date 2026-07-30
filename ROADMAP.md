@@ -20,7 +20,7 @@ See [`CONTEXT.md`](./CONTEXT.md) for vocabulary — a *particle* is a running WA
 | Messaging | `send` / `recv`, plus `send-ref` / `recv-ref` for tagged request-reply correlation. `send` takes a **destination** — a pid, a local name, or a name on another node — and **routes to any node** and is fire-and-forget: it never blocks and never reports a delivery failure, local or remote. Messages from one particle to another arrive in send order, across nodes. Liveness is discovered with `monitor` |
 | Naming | `register` / `unregister` / `lookup` by name, node-scoped as in Erlang; `resolve` from a pid string. A name on another node is addressed as a `named(node, name)` **destination**, resolved on the receiving node — there is no remote lookup |
 | Links & monitors | `link` / `unlink` (bidirectional, exit-propagating), `monitor` / `demonitor` (unidirectional, non-propagating), `trap-exit` to receive exit signals as ordinary messages. **They work across nodes**, taking a destination like `send`. Both are asynchronous: `link` is infallible and `monitor` always returns a ref, with a missing target arriving as a signal carrying `noproc` |
-| Exit | `exit(reason)` with `normal` / `kill` / `shutdown` / `exception`; exit and down signals arrive as mailbox messages |
+| Exit | `exit(reason)` terminates the caller unconditionally. `exit-signal(dest, reason)` signals **any particle on any node** — asynchronous and infallible like `send`, so the caller learns nothing and `monitor`s if it cares. `kill` **sent** this way is untrappable and the target dies as `killed`; `kill` or `killed` **inherited** through a link is an ordinary, trappable reason. Erlang's `exit/1` and `exit_signal/2` |
 | Execution | Async invocation via wasmtime fibers; host functions are natively async |
 | WASI | `wasm32-wasip1` components supported via `wasmtime-wasi` |
 
@@ -41,13 +41,11 @@ See [`CONTEXT.md`](./CONTEXT.md) for vocabulary — a *particle* is a running WA
 
 ## Not built
 
-**Supervision** — no supervisor exists, and there are no restart strategies or restart-intensity limits. The primitives a supervisor would be built from — `link`, `monitor`, `trap-exit`, exit-signal propagation — are all in place and working. Supervisors are intended to be ordinary particles rather than a runtime feature, as in OTP.
+**Supervision** — no supervisor exists, and there are no restart strategies or restart-intensity limits. The primitives a supervisor would be built from — `link`, `monitor`, `trap-exit`, `exit-signal`, and exit-signal propagation — are all in place and working, including the untrappable kill behind OTP's `brutal_kill`. Supervisors are intended to be ordinary particles rather than a runtime feature, as in OTP.
 
 **Capability enforcement** — every host function is linked unconditionally. No policy is evaluated, so a particle's imports are not restricted.
 
 **Component distribution** — `spawn` requires the component to be already loaded on the target node. There is no mechanism to ship a component to a node that lacks it.
-
-**Signalling another particle's exit** — `exit` terminates the caller only; a particle cannot send `kill` or any other signal to a different particle.
 
 ---
 
@@ -73,7 +71,7 @@ Present in the source, compiling, partly tested — and unreachable. Listed beca
 
 ## Open questions
 
-Design decisions that remain genuinely open — mailbox overflow policy, cross-node supervision granularity, component distribution strategy, capability scoping, observability surface, and how a kill capability would be granted — are tracked in [issue #10](https://github.com/scrogson/plasmoid/issues/10).
+Design decisions that remain genuinely open — mailbox overflow policy, cross-node supervision granularity, component distribution strategy, capability scoping, and observability surface — are tracked in [issue #10](https://github.com/scrogson/plasmoid/issues/10).
 
 ---
 

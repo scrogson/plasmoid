@@ -136,6 +136,47 @@ impl plasmoid::runtime::host::Host for HostState {
         Ok(())
     }
 
+    /// Send an exit signal to another particle, wherever it lives (#27).
+    ///
+    /// Asynchronous and infallible, exactly like `send`: a dead target, an
+    /// unreachable node or a stale handle all drop it silently, and the caller
+    /// learns nothing either way. Erlang's `exit/2` likewise returns `true`
+    /// unconditionally; a caller that needs to know monitors the target first.
+    ///
+    /// Addressed at yourself, this is *not* [`Self::exit`] — it goes through
+    /// your own trap rules like anybody else's signal.
+    async fn exit_signal(
+        &mut self,
+        dest: plasmoid::runtime::host::Destination,
+        reason: plasmoid::runtime::host::ExitReason,
+    ) -> wasmtime::Result<()> {
+        let me = self.pid().clone();
+        let reason = wit_exit_reason_to_internal(reason);
+
+        match self.resolve_local(&dest) {
+            LocalTarget::Here(t) => {
+                let Some(registry) = self.registry().cloned() else {
+                    return Ok(());
+                };
+                if let Some(target) = self.resolve_named(t).await {
+                    registry.apply_directed_exit(&target, &me, reason).await;
+                }
+            }
+            LocalTarget::Elsewhere(node, addressee) => {
+                self.send_control(
+                    node,
+                    crate::transport::PeerMessage::ExitSignal {
+                        from: me,
+                        to: addressee,
+                        reason,
+                    },
+                );
+            }
+            LocalTarget::Unknown => {}
+        }
+        Ok(())
+    }
+
     /// Deliver a message, routing by the target's home node.
     ///
     /// Fire-and-forget per #14: this never reports a delivery failure. A dead
@@ -487,6 +528,7 @@ fn wit_exit_reason_to_internal(reason: plasmoid::runtime::host::ExitReason) -> E
     match reason {
         plasmoid::runtime::host::ExitReason::Normal => ExitReason::Normal,
         plasmoid::runtime::host::ExitReason::Kill => ExitReason::Kill,
+        plasmoid::runtime::host::ExitReason::Killed => ExitReason::Killed,
         plasmoid::runtime::host::ExitReason::Shutdown(s) => ExitReason::Shutdown(s),
         plasmoid::runtime::host::ExitReason::Exception(s) => ExitReason::Exception(s),
         plasmoid::runtime::host::ExitReason::Noproc => ExitReason::NoProc,
@@ -499,6 +541,7 @@ fn internal_exit_reason_to_wit(reason: &ExitReason) -> plasmoid::runtime::host::
     match reason {
         ExitReason::Normal => plasmoid::runtime::host::ExitReason::Normal,
         ExitReason::Kill => plasmoid::runtime::host::ExitReason::Kill,
+        ExitReason::Killed => plasmoid::runtime::host::ExitReason::Killed,
         ExitReason::Shutdown(s) => plasmoid::runtime::host::ExitReason::Shutdown(s.clone()),
         ExitReason::Exception(s) => plasmoid::runtime::host::ExitReason::Exception(s.clone()),
         ExitReason::NoProc => plasmoid::runtime::host::ExitReason::Noproc,
@@ -534,7 +577,7 @@ fn mailbox_message_to_wit(
         MailboxMessage::Exit { from, reason } => {
             let sender_resource = resource_table.push(from)?;
             Ok(plasmoid::runtime::host::Message::Exit(
-                plasmoid::runtime::host::ExitSignal {
+                plasmoid::runtime::host::ExitMessage {
                     sender: sender_resource,
                     reason: internal_exit_reason_to_wit(&reason),
                 },
@@ -547,7 +590,7 @@ fn mailbox_message_to_wit(
         } => {
             let sender_resource = resource_table.push(from)?;
             Ok(plasmoid::runtime::host::Message::Down(
-                plasmoid::runtime::host::DownSignal {
+                plasmoid::runtime::host::DownMessage {
                     sender: sender_resource,
                     ref_: ref_id,
                     reason: internal_exit_reason_to_wit(&reason),

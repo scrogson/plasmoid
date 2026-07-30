@@ -90,7 +90,7 @@ pub fn spawn_node_loss_reactor(registry: Arc<ParticleRegistry>, peers: Arc<PeerL
 
                     for (local, remote) in links {
                         registry
-                            .apply_exit_signal(&local, &remote, ExitReason::NoConnection)
+                            .apply_inherited_exit(&local, &remote, ExitReason::NoConnection)
                             .await;
                     }
                     for (watcher, target, ref_id) in monitors {

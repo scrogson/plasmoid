@@ -341,7 +341,14 @@ async fn handle_peer_message(
             registry.demonitor(&watcher, ref_id).await;
         }
         PeerMessage::Exit { from, to, reason } => {
-            registry.apply_exit_signal(&to, &from, reason).await;
+            registry.apply_inherited_exit(&to, &from, reason).await;
+        }
+        PeerMessage::ExitSignal { from, to, reason } => {
+            // A target that is already gone is not an error, and is not
+            // reported: `exit-signal` tells the sender nothing, here as locally.
+            if let Some(target) = resolve(registry, &to).await {
+                registry.apply_directed_exit(&target, &from, reason).await;
+            }
         }
         PeerMessage::Down {
             from,

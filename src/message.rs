@@ -4,7 +4,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ExitReason {
     Normal,
+    /// Asked for by name. Untrappable when sent directly with `exit-signal`;
+    /// an ordinary, trappable reason when inherited through a link.
     Kill,
+    /// The result of being killed. Kept distinct from [`ExitReason::Shutdown`]
+    /// so a supervisor can tell "I stopped it" from "something killed it".
+    Killed,
     Shutdown(String),
     Exception(String),
     /// The target did not exist. Delivered when a link or monitor names

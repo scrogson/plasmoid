@@ -86,10 +86,24 @@ pub enum PeerMessage {
         watcher: Pid,
         ref_id: u64,
     },
-    /// A linked particle died on the sending node.
+    /// A linked particle died on the sending node, and `to` inherits its reason.
+    ///
+    /// Distinct from [`PeerMessage::ExitSignal`] because the receiver must tell
+    /// the two apart: an inherited `kill` is trappable, a directed one is not.
+    /// Erlang draws the same distinction — "signals with exit reason `kill`
+    /// behave differently depending on how they are sent".
     Exit {
         from: Pid,
         to: Pid,
+        reason: ExitReason,
+    },
+    /// `from` called `exit-signal` on `to`, which lives on the receiving node.
+    ///
+    /// Carries an [`Addressee`] rather than a `Pid` because the target may be
+    /// named, and a name is resolved where it lives (#19).
+    ExitSignal {
+        from: Pid,
+        to: Addressee,
         reason: ExitReason,
     },
     /// A monitored particle died on the sending node.

@@ -37,12 +37,16 @@ A unidirectional, non-propagating watch on a particle. The watcher receives a me
 _Avoid_: Observer, watcher, subscription
 
 **Exit signal**:
-The notification sent along links when a particle terminates, carrying the reason. Propagates death by default.
+The notification carrying a termination reason. Either **inherited** — sent along links when a particle dies — or **directed**, sent at a particle on purpose with `exit-signal`. Propagates death by default. The distinction matters only for `kill`, which is untrappable when directed and trappable when inherited.
 _Avoid_: Error, exception, crash event
 
 **Trap exits**:
-The setting by which a particle receives incoming exit signals as ordinary mailbox messages rather than dying from them. The mechanism supervision is built from.
+The setting by which a particle receives incoming exit signals as ordinary mailbox messages rather than dying from them. The mechanism supervision is built from. Does not save a particle from a directed `kill` — nothing does, which is what makes a kill a guarantee.
 _Avoid_: Catch, handle errors, intercept
+
+**Kill / killed**:
+`kill` is the reason you *ask* for; `killed` is the reason the particle *dies of*, and what its links inherit. Kept distinct from `shutdown` so a supervisor can tell "I stopped it" from "something killed it".
+_Avoid_: Terminate, destroy, force-quit
 
 ### Naming notes
 

@@ -398,7 +398,7 @@ async fn cmd_send(args: &[String]) -> Result<()> {
 // Scaffolding commands
 // ---------------------------------------------------------------------------
 
-const RUNTIME_WIT: &str = r#"package plasmoid:runtime@0.8.0;
+const RUNTIME_WIT: &str = r#"package plasmoid:runtime@0.9.0;
 
 interface host {
     resource pid {
@@ -437,7 +437,27 @@ interface host {
     /// arrives as a `spawn-reply` message, correlated with `recv-ref`.
     spawn-request: func(node: node-id, component: string, name: option<string>, init-args: string) -> u64;
 
+    /// Terminate the calling particle, unconditionally.
+    ///
+    /// Distinct from `exit-signal` addressed at yourself, which goes through
+    /// your own trap rules like anybody else's signal: `exit-signal` with
+    /// `normal` while trapping delivers a message and you keep running, so
+    /// collapsing the two would leave no way to say *terminate me now*.
+    /// Erlang draws the same line between `exit/1` and `exit/2`.
     exit: func(reason: exit-reason);
+
+    /// Send an exit signal to another particle, on any node.
+    ///
+    /// Asynchronous and infallible, like `send`: it reports nothing, and a
+    /// dead target or an unreachable node drops it silently. A caller that
+    /// needs to know the target died `monitor`s it first.
+    ///
+    /// `kill` sent this way is **untrappable** — the target dies with `killed`
+    /// whether or not it traps exits. `killed` *inherited* through a link is an
+    /// ordinary reason and can be trapped. That asymmetry is deliberate: it
+    /// makes a kill a guarantee without making anything unkillable. Erlang's
+    /// `exit_signal/2` behaves identically.
+    exit-signal: func(dest: destination, reason: exit-reason);
 
     send: func(dest: destination, msg: list<u8>);
     send-ref: func(dest: destination, ref: u64, msg: list<u8>);
@@ -467,7 +487,12 @@ interface host {
 
     variant exit-reason {
         normal,
+        /// Asked for by name. Untrappable when sent with `exit-signal`;
+        /// trappable when inherited through a link.
         kill,
+        /// The result of being killed. Distinct from `shutdown` so a supervisor
+        /// can tell "I stopped it" from "something killed it".
+        killed,
         shutdown(string),
         exception(string),
         /// The target did not exist.
@@ -476,12 +501,15 @@ interface host {
         noconnection,
     }
 
-    record exit-signal {
+    /// A trapped exit signal, delivered as an ordinary message. Erlang's
+    /// `{'EXIT', From, Reason}` — a signal becomes a message when trapped,
+    /// which is why this is not called `exit-signal`.
+    record exit-message {
         sender: pid,
         reason: exit-reason,
     }
 
-    record down-signal {
+    record down-message {
         sender: pid,
         ref: u64,
         reason: exit-reason,
@@ -501,8 +529,8 @@ interface host {
     variant message {
         data(list<u8>),
         tagged(tagged-message),
-        exit(exit-signal),
-        down(down-signal),
+        exit(exit-message),
+        down(down-message),
         spawn-reply(spawn-reply),
     }
 
@@ -738,7 +766,7 @@ bindings::export!({pascal_name} with_types_in bindings);
         r#"package {namespace}:{name}@0.1.0;
 
 world {name_underscored} {{
-    include plasmoid:runtime/particle@0.8.0;
+    include plasmoid:runtime/particle@0.9.0;
     export start: func() -> result<_, string>;
 }}
 "#
