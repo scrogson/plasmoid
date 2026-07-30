@@ -629,13 +629,29 @@ impl ParticleRegistry {
 
         // Remove particle entry, keeping the name so it can ride along on the
         // death broadcast — observers cannot look it up once it is gone.
+        //
+        // The name is found by scanning for the pid rather than read off the
+        // entry, because [`Self::register_name`] never touches the entry: a name
+        // taken at runtime lived only in `names`, so death left it there,
+        // pointing at a dead pid. Nothing could then take that name again —
+        // `register_name` refuses one already present — so a particle that
+        // registered and died poisoned the name permanently. Scanning by pid is
+        // authoritative however the name was acquired.
         let registered_name = {
-            let entry = self.particles.write().await.remove(pid);
-            let name = entry.and_then(|e| e.name);
-            if let Some(ref name) = name {
-                self.names.write().await.remove(name);
+            self.particles.write().await.remove(pid);
+            let mut names = self.names.write().await;
+            let held: Vec<String> = names
+                .iter()
+                .filter(|(_, owner)| *owner == pid)
+                .map(|(name, _)| name.clone())
+                .collect();
+            for name in &held {
+                names.remove(name);
             }
-            name
+            // Erlang allows a process only one registered name; whether Plasmoid
+            // follows is #32's to settle, so this drops every name it holds and
+            // reports the first.
+            held.into_iter().next()
         };
 
         let links = particle_state.links;
@@ -1332,6 +1348,51 @@ mod tests {
         // Whereas exit() on the same particle is unconditional.
         registry.exit_particle(&target, ExitReason::Normal).await;
         assert!(!registry.particle_exists(&target).await);
+    }
+
+    /// A name taken at runtime must die with its particle.
+    ///
+    /// It used to outlive it: `register_name` writes only to `names`, while
+    /// death cleaned up from `ParticleEntry.name`, which it never set. The name
+    /// was left pointing at a dead pid *and* could never be claimed again, since
+    /// registering an existing name is refused — a permanent poisoning of that
+    /// name on that node, and the worst possible foundation for #32.
+    #[tokio::test]
+    async fn test_a_runtime_registered_name_is_released_on_death() {
+        let registry = make_registry();
+        let (pid, _mailbox) = spawn_test_particle(&registry).await;
+
+        registry.register_name(&pid, "worker").await.unwrap();
+        assert_eq!(registry.lookup_name("worker").await, Some(pid.clone()));
+
+        registry.exit_particle(&pid, ExitReason::Normal).await;
+
+        assert!(
+            registry.lookup_name("worker").await.is_none(),
+            "a dead particle must not keep its name"
+        );
+
+        let (successor, _) = spawn_test_particle(&registry).await;
+        registry
+            .register_name(&successor, "worker")
+            .await
+            .expect("and the name must be claimable again, or a restart cannot reuse it");
+    }
+
+    /// The death broadcast carries a runtime-registered name too — observers
+    /// cannot look it up afterwards, so it has to ride along.
+    #[tokio::test]
+    async fn test_a_runtime_registered_name_rides_the_death_broadcast() {
+        let registry = make_registry();
+        let (pid, _mailbox) = spawn_test_particle(&registry).await;
+        let mut deaths = registry.subscribe_deaths();
+
+        registry.register_name(&pid, "worker").await.unwrap();
+        registry.exit_particle(&pid, ExitReason::Normal).await;
+
+        let death = deaths.recv().await.unwrap();
+        assert_eq!(death.pid, pid);
+        assert_eq!(death.name.as_deref(), Some("worker"));
     }
 
     /// Signalling something already dead is a no-op, and reports nothing.
