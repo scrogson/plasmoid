@@ -1,0 +1,199 @@
+package plasmoid:runtime@0.11.0;
+
+interface host {
+    resource pid {
+        to-string: func() -> string;
+    }
+
+    /// A node's identity, as full hex. Never the truncated form `pid.to-string`
+    /// renders, which keeps only 4 of 32 bytes and cannot be parsed back.
+    type node-id = string;
+
+    /// Anything a message can be addressed to.
+    ///
+    /// One destination type rather than one function per address form, so a new
+    /// form costs a case here instead of a parallel set of functions. A `named`
+    /// destination is resolved on the *receiving* node — there is no lookup.
+    variant destination {
+        pid(borrow<pid>),
+        local-named(string),
+        named(tuple<node-id, string>),
+    }
+
+    self-pid: func() -> pid;
+    self-name: func() -> option<string>;
+    self-node: func() -> node-id;
+    node-of: func(p: borrow<pid>) -> node-id;
+
+    make-ref: func() -> u64;
+
+    spawn: func(component: string, name: option<string>, init-args: string) -> result<pid, spawn-error>;
+
+    /// Spawn and link **atomically**, as Erlang's `spawn_link` does.
+    ///
+    /// Not a convenience. Spawning and then linking loses the exit reason: the
+    /// child runs immediately and may be gone before the link lands, and a link
+    /// to a dead particle reports `noproc` rather than what actually happened.
+    /// A supervisor cannot then tell "finished its job" from "crashed", which is
+    /// exactly the distinction a `transient` child's restart policy turns on --
+    /// so a child that exits normally too quickly would be restarted forever.
+    spawn-link: func(component: string, name: option<string>, init-args: string) -> result<pid, spawn-error>;
+
+    /// Spawn on another node, waiting for it to allocate the pid and reply.
+    /// Blocking is acceptable here because spawn is not a hot path.
+    spawn-on: func(node: node-id, component: string, name: option<string>, init-args: string) -> result<pid, spawn-error>;
+
+    /// Spawn on another node without waiting. Returns a ref; the outcome
+    /// arrives as a `spawn-reply` message, correlated with `recv-ref`.
+    spawn-request: func(node: node-id, component: string, name: option<string>, init-args: string) -> u64;
+
+    /// Terminate the calling particle, unconditionally.
+    ///
+    /// Distinct from `exit-signal` addressed at yourself, which goes through
+    /// your own trap rules like anybody else's signal: `exit-signal` with
+    /// `normal` while trapping delivers a message and you keep running, so
+    /// collapsing the two would leave no way to say *terminate me now*.
+    /// Erlang draws the same line between `exit/1` and `exit/2`.
+    exit: func(reason: exit-reason);
+
+    /// Send an exit signal to another particle, on any node.
+    ///
+    /// Asynchronous and infallible, like `send`: it reports nothing, and a
+    /// dead target or an unreachable node drops it silently. A caller that
+    /// needs to know the target died `monitor`s it first.
+    ///
+    /// `kill` sent this way is **untrappable** — the target dies with `killed`
+    /// whether or not it traps exits. `killed` *inherited* through a link is an
+    /// ordinary reason and can be trapped. That asymmetry is deliberate: it
+    /// makes a kill a guarantee without making anything unkillable. Erlang's
+    /// `exit_signal/2` behaves identically.
+    exit-signal: func(dest: destination, reason: exit-reason);
+
+    send: func(dest: destination, msg: list<u8>);
+    send-ref: func(dest: destination, ref: u64, msg: list<u8>);
+
+    recv: func(timeout-ms: option<u64>) -> option<message>;
+    recv-ref: func(ref: u64, timeout-ms: option<u64>) -> option<message>;
+
+    resolve: func(pid-string: string) -> option<pid>;
+
+    register: func(name: string) -> result<_, registry-error>;
+    unregister: func(name: string) -> result<_, registry-error>;
+    lookup: func(name: string) -> option<pid>;
+
+    /// Claim a name across the whole cluster, so exactly one particle holds it.
+    ///
+    /// **Blocks.** Claiming locks every member, which is a round trip by
+    /// nature; Erlang's `global:register_name` is synchronous for the same
+    /// reason. Not a hot path.
+    ///
+    /// Losing a *simultaneous* claim is an ordinary `taken` return and nothing
+    /// dies. Losing a conflict discovered when two partitions merge is
+    /// different: nobody was wrong when they claimed, so the lower pid keeps
+    /// the name and the other particle is killed.
+    global-register: func(name: string) -> result<_, claim-error>;
+    global-unregister: func(name: string);
+
+    /// **Blocks** while two name tables are merging, so it never hands back a
+    /// particle that is about to lose a conflict and be killed. Erlang does not
+    /// wait, and may. Bounded: a merge has no natural limit, and an unbounded
+    /// wait would wedge every lookup the first time one stalled.
+    global-lookup: func(name: string) -> result<option<pid>, lookup-error>;
+
+    variant claim-error {
+        /// Held by a live particle.
+        taken(pid),
+        /// The claimant already holds a global name. Erlang allows a process
+        /// exactly one, and calls supporting several broken.
+        already-named(string),
+        /// The cluster would not settle: locks stayed busy, or membership kept
+        /// changing under the claim.
+        unsettled,
+    }
+
+    variant lookup-error {
+        /// A merge did not settle in time. The name may or may not exist —
+        /// which is why this is not `none`, a claim we cannot make.
+        unsettled,
+    }
+
+    /// Infallible: if the target is already gone, that arrives as an exit
+    /// signal carrying `noproc`, not as a return value.
+    link: func(dest: destination);
+    unlink: func(dest: destination);
+    /// Always returns a valid ref. A target that does not exist produces an
+    /// immediate down signal carrying `noproc`.
+    monitor: func(dest: destination) -> u64;
+    demonitor: func(ref: u64);
+    trap-exit: func(enabled: bool);
+
+    log: func(level: log-level, message: string);
+
+    enum log-level { trace, debug, info, warn, error }
+
+    variant exit-reason {
+        normal,
+        /// Asked for by name. Untrappable when sent with `exit-signal`;
+        /// trappable when inherited through a link.
+        kill,
+        /// The result of being killed. Distinct from `shutdown` so a supervisor
+        /// can tell "I stopped it" from "something killed it".
+        killed,
+        shutdown(string),
+        exception(string),
+        /// The target did not exist.
+        noproc,
+        /// The node holding the target was lost.
+        noconnection,
+    }
+
+    /// A trapped exit signal, delivered as an ordinary message. Erlang's
+    /// `{'EXIT', From, Reason}` — a signal becomes a message when trapped,
+    /// which is why this is not called `exit-signal`.
+    record exit-message {
+        sender: pid,
+        reason: exit-reason,
+    }
+
+    record down-message {
+        sender: pid,
+        ref: u64,
+        reason: exit-reason,
+    }
+
+    record tagged-message {
+        ref: u64,
+        payload: list<u8>,
+    }
+
+    /// The outcome of a `spawn-request`, delivered as a message.
+    record spawn-reply {
+        ref: u64,
+        outcome: result<pid, spawn-error>,
+    }
+
+    variant message {
+        data(list<u8>),
+        tagged(tagged-message),
+        exit(exit-message),
+        down(down-message),
+        spawn-reply(spawn-reply),
+    }
+
+    enum spawn-error {
+        component-not-found,
+        init-failed,
+        resource-limit,
+        node-unreachable,
+    }
+
+    enum registry-error {
+        already-registered,
+        not-registered,
+    }
+
+}
+
+world particle {
+    import host;
+}

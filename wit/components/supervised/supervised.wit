@@ -1,0 +1,6 @@
+package plasmoid:supervised@0.1.0;
+
+world supervised {
+    include plasmoid:runtime/particle@0.11.0;
+    export start: func(init-args: string) -> result<_, string>;
+}

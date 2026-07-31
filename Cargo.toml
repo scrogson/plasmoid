@@ -1,6 +1,6 @@
 [workspace]
 members = [".", "crates/plasmoid-macros", "crates/plasmoid-sdk"]
-exclude = ["components/echo", "components/ring"]
+exclude = ["components/echo", "components/ring", "components/supervised"]
 
 [package]
 name = "plasmoid"

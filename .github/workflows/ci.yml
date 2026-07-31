@@ -64,9 +64,12 @@ jobs:
         run: |
           (cd components/echo && cargo component build --release)
           (cd components/ring && cargo component build --release)
+          (cd components/supervised && cargo component build --release)
 
       - name: Assert the e2e artifact exists
-        run: test -f components/echo/target/wasm32-wasip1/release/echo.wasm
+        run: |
+          test -f components/echo/target/wasm32-wasip1/release/echo.wasm
+          test -f components/supervised/target/wasm32-wasip1/release/supervised.wasm
 
       - run: cargo build --workspace --all-targets
 

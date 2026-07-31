@@ -759,6 +759,15 @@ impl ParticleRegistry {
     }
 
     /// Check if a particle exists.
+    /// How many particles are alive.
+    ///
+    /// Enough to observe a supervision tree from outside without the runtime
+    /// knowing what a tree is: a restart keeps the count steady, a collapse
+    /// takes it to zero.
+    pub async fn particle_count(&self) -> usize {
+        self.particle_states.read().await.len()
+    }
+
     pub async fn particle_exists(&self, pid: &Pid) -> bool {
         self.particle_states.read().await.contains_key(pid)
     }
