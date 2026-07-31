@@ -4,6 +4,7 @@ pub use plasmoid_macros::main;
 pub mod log;
 pub mod messaging;
 pub mod prelude;
+pub mod supervisor;
 
 pub fn from_init_args<T: serde::de::DeserializeOwned>(s: &str) -> Result<T, String> {
     serde_json::from_str(s).map_err(|e| format!("failed to parse init args: {e}"))

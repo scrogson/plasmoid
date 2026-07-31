@@ -1,6 +1,6 @@
 package plasmoid:echo@0.1.0;
 
 world echo {
-    include plasmoid:runtime/particle@0.10.0;
+    include plasmoid:runtime/particle@0.11.0;
     export start: func() -> result<_, string>;
 }

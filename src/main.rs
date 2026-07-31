@@ -398,7 +398,7 @@ async fn cmd_send(args: &[String]) -> Result<()> {
 // Scaffolding commands
 // ---------------------------------------------------------------------------
 
-const RUNTIME_WIT: &str = r#"package plasmoid:runtime@0.10.0;
+const RUNTIME_WIT: &str = r#"package plasmoid:runtime@0.11.0;
 
 interface host {
     resource pid {
@@ -428,6 +428,16 @@ interface host {
     make-ref: func() -> u64;
 
     spawn: func(component: string, name: option<string>, init-args: string) -> result<pid, spawn-error>;
+
+    /// Spawn and link **atomically**, as Erlang's `spawn_link` does.
+    ///
+    /// Not a convenience. Spawning and then linking loses the exit reason: the
+    /// child runs immediately and may be gone before the link lands, and a link
+    /// to a dead particle reports `noproc` rather than what actually happened.
+    /// A supervisor cannot then tell "finished its job" from "crashed", which is
+    /// exactly the distinction a `transient` child's restart policy turns on --
+    /// so a child that exits normally too quickly would be restarted forever.
+    spawn-link: func(component: string, name: option<string>, init-args: string) -> result<pid, spawn-error>;
 
     /// Spawn on another node, waiting for it to allocate the pid and reply.
     /// Blocking is acceptable here because spawn is not a hot path.
@@ -802,7 +812,7 @@ bindings::export!({pascal_name} with_types_in bindings);
         r#"package {namespace}:{name}@0.1.0;
 
 world {name_underscored} {{
-    include plasmoid:runtime/particle@0.10.0;
+    include plasmoid:runtime/particle@0.11.0;
     export start: func() -> result<_, string>;
 }}
 "#

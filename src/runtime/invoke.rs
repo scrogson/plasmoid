@@ -130,6 +130,62 @@ impl plasmoid::runtime::host::Host for HostState {
         Ok(Ok(resource))
     }
 
+    /// Spawn and link atomically (#38).
+    ///
+    /// The link is recorded **before** the child is started, so a child that
+    /// dies immediately still reports its real exit reason rather than the
+    /// `noproc` a later `link` would produce. That distinction is what a
+    /// `transient` child's restart policy depends on.
+    async fn spawn_link(
+        &mut self,
+        component: String,
+        name: Option<String>,
+        init_args: String,
+    ) -> wasmtime::Result<Result<Resource<Pid>, plasmoid::runtime::host::SpawnError>> {
+        let me = self.pid().clone();
+        let registry = match self.registry() {
+            Some(r) => r.clone(),
+            None => return Ok(Err(plasmoid::runtime::host::SpawnError::InitFailed)),
+        };
+        let engine = match self.engine() {
+            Some(e) => e.clone(),
+            None => return Ok(Err(plasmoid::runtime::host::SpawnError::InitFailed)),
+        };
+
+        let (comp, caps) = match registry.get_component(&component).await {
+            Some(v) => v,
+            None => return Ok(Err(plasmoid::runtime::host::SpawnError::ComponentNotFound)),
+        };
+        let (pid, mailbox) = match registry
+            .spawn(&component, name.as_deref(), Some(caps.clone()))
+            .await
+        {
+            Ok(v) => v,
+            Err(_) => return Ok(Err(plasmoid::runtime::host::SpawnError::InitFailed)),
+        };
+
+        // The whole point: linked before it can run, so its death is reported
+        // with the reason it died of.
+        let _ = registry.link(&me, &pid).await;
+
+        let ctx = ParticleContext {
+            mailbox,
+            registry: registry.clone(),
+            endpoint: self.endpoint().cloned(),
+            peers: self.peers().cloned(),
+            cluster: self.cluster().cloned(),
+            global: self.global().cloned(),
+        };
+        if let Err(e) =
+            start_particle(&engine, &comp, &caps, pid.clone(), name, &init_args, ctx).await
+        {
+            tracing::error!(error = %e, "Failed to start linked particle");
+            return Ok(Err(plasmoid::runtime::host::SpawnError::InitFailed));
+        }
+
+        Ok(Ok(self.resource_table_mut().push(pid)?))
+    }
+
     async fn exit(&mut self, reason: plasmoid::runtime::host::ExitReason) -> wasmtime::Result<()> {
         let exit_reason = wit_exit_reason_to_internal(reason);
         let pid = self.pid().clone();

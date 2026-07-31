@@ -43,7 +43,7 @@ See [`CONTEXT.md`](./CONTEXT.md) for vocabulary — a *particle* is a running WA
 
 ## Not built
 
-**Supervision** — no supervisor exists, and there are no restart strategies or restart-intensity limits. The primitives a supervisor would be built from — `link`, `monitor`, `trap-exit`, `exit-signal`, and exit-signal propagation — are all in place and working, including the untrappable kill behind OTP's `brutal_kill`. Supervisors are intended to be ordinary particles rather than a runtime feature, as in OTP.
+**Supervision** — the restart policy exists and is tested (`crates/plasmoid-sdk/src/supervisor.rs`): strategies, restart types, the shutdown protocol and restart intensity, as a pure decision core returning actions. What is **not** yet wired is the particle-side driver that executes those actions and the boot path that starts a tree, so no application is supervised yet. The primitives a supervisor would be built from — `link`, `monitor`, `trap-exit`, `exit-signal`, and exit-signal propagation — are all in place and working, including the untrappable kill behind OTP's `brutal_kill`. Supervisors are intended to be ordinary particles rather than a runtime feature, as in OTP.
 
 **Capability enforcement** — every host function is linked unconditionally. No policy is evaluated, so a particle's imports are not restricted.
 
