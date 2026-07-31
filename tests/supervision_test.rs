@@ -130,3 +130,106 @@ async fn test_a_finished_temporary_child_is_not_restarted() {
          a restarted temporary child would show as 3 and a collapsed tree as 0"
     );
 }
+
+/// The manifest boot path, exercised as a real process (#41).
+///
+/// These run the actual binary because the thing under test *is* the exit code.
+/// Nothing in-process can observe it, and it is the whole mechanism by which a
+/// collapsed supervision tree becomes visible to systemd or Kubernetes — the
+/// runtime deliberately cannot see a tree to report on it any other way.
+mod boot {
+    use super::*;
+    use std::io::Write;
+    use std::process::Command;
+
+    fn manifest(dir: &Path, restart_type: &str, init: &str) -> std::path::PathBuf {
+        let path = dir.join("plasmoid.toml");
+        let mut f = std::fs::File::create(&path).unwrap();
+        write!(
+            f,
+            "name = \"demo\"\nroot = \"supervised\"\ntype = \"{restart_type}\"\ninit_args = '{init}'\n"
+        )
+        .unwrap();
+        path
+    }
+
+    const COLLAPSES: &str = r#"{"supervisor":{"strategy":"one-for-one","intensity":1,"children":[{"id":"boom","role":"crasher","restart":"permanent"}]}}"#;
+
+    fn run(dir: &tempfile::TempDir, manifest_path: &Path) -> Option<std::process::Output> {
+        if !Path::new(WASM).exists() {
+            eprintln!("Skipping: supervised.wasm not found at {WASM}");
+            return None;
+        }
+        let wasm = std::fs::canonicalize(WASM).unwrap();
+        Some(
+            Command::new(env!("CARGO_BIN_EXE_plasmoid"))
+                .current_dir(dir.path())
+                .args([
+                    "start",
+                    wasm.to_str().unwrap(),
+                    "--data-dir",
+                    dir.path().to_str().unwrap(),
+                    "--app",
+                    manifest_path.to_str().unwrap(),
+                ])
+                .output()
+                .expect("plasmoid should run"),
+        )
+    }
+
+    #[test]
+    fn test_a_collapsed_tree_exits_the_node_non_zero() {
+        // `shutdown` is what a supervisor exits with when it gives up, and it
+        // must NOT be treated as a clean stop here -- otherwise the node exits
+        // zero and `Restart=on-failure` never fires. This is the opposite of
+        // the rule a `transient` child's restart policy uses, deliberately.
+        let dir = tempfile::tempdir().unwrap();
+        let m = manifest(dir.path(), "permanent", COLLAPSES);
+        let Some(out) = run(&dir, &m) else { return };
+
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "a collapsed tree must look like a failure to whatever supervises the node.\nstderr:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn test_a_temporary_root_leaves_the_node_running() {
+        // The node must NOT exit, so success is the process still being alive
+        // when we give up waiting for it.
+        let dir = tempfile::tempdir().unwrap();
+        let m = manifest(dir.path(), "temporary", COLLAPSES);
+        if !Path::new(WASM).exists() {
+            eprintln!("Skipping: supervised.wasm not found at {WASM}");
+            return;
+        }
+        let wasm = std::fs::canonicalize(WASM).unwrap();
+
+        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_plasmoid"))
+            .current_dir(dir.path())
+            .args([
+                "start",
+                wasm.to_str().unwrap(),
+                "--data-dir",
+                dir.path().to_str().unwrap(),
+                "--app",
+                m.to_str().unwrap(),
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("plasmoid should run");
+
+        std::thread::sleep(Duration::from_secs(5));
+        let still_running = child.try_wait().unwrap().is_none();
+        child.kill().ok();
+        child.wait().ok();
+
+        assert!(
+            still_running,
+            "a `temporary` root's collapse is reported, not fatal -- the node keeps running"
+        );
+    }
+}

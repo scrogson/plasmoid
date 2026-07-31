@@ -1,3 +1,4 @@
+pub mod app;
 pub mod client;
 pub mod cluster;
 pub mod cluster_reactor;

@@ -21,6 +21,9 @@ Usage:
         --data-dir <dir>                     Data directory for persistent node identity
                                              (default: ~/.config/plasmoid)
         --peer <node-id>                     Join the cluster this node belongs to
+        --app <manifest.toml>                Start an application: spawns its root
+                                             component, and exits the node when
+                                             that root dies (see `type`)
         --load-path <dir>                    Load all .wasm files from directory
         --spawn <component> [--name <name>] [--init <wave-expr>]
                                              Spawn a particle after loading
@@ -103,6 +106,7 @@ async fn cmd_start(args: &[String]) -> Result<()> {
     let mut spawn_specs: Vec<SpawnSpec> = Vec::new();
     let mut data_dir: Option<PathBuf> = None;
     let mut peers: Vec<EndpointId> = Vec::new();
+    let mut manifest: Option<plasmoid::app::Manifest> = None;
     let mut i = 0;
 
     while i < args.len() {
@@ -139,6 +143,13 @@ async fn cmd_start(args: &[String]) -> Result<()> {
                         wasm_files.push(file_path.to_string_lossy().to_string());
                     }
                 }
+                i += 2;
+            }
+            "--app" => {
+                let path = args
+                    .get(i + 1)
+                    .ok_or_else(|| anyhow::anyhow!("--app requires a manifest path"))?;
+                manifest = Some(plasmoid::app::Manifest::load(std::path::Path::new(path))?);
                 i += 2;
             }
             "--spawn" => {
@@ -266,9 +277,91 @@ async fn cmd_start(args: &[String]) -> Result<()> {
         eprintln!();
     }
 
+    // An application manifest names the root and what its death means (#41).
+    if let Some(manifest) = manifest {
+        let root = runtime
+            .spawn(
+                &manifest.root,
+                Some(&manifest.name),
+                Some(PolicySet::all()),
+                &manifest.init_args,
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("could not start root component '{}': {e}", manifest.root)
+            })?;
+
+        eprintln!(
+            "Application '{}' started: root {} ({}, {:?})",
+            manifest.name, root, manifest.root, manifest.r#type
+        );
+        eprintln!();
+
+        // The node's fate is tied to the root's. The runtime cannot see a
+        // supervision tree, so it can never report that one collapsed -- but it
+        // does not need to. Exiting makes the collapse visible to systemd,
+        // Kubernetes, Docker and anything else already watching the process.
+        let code = watch_root(&runtime, root, manifest.r#type).await;
+        if let Some(code) = code {
+            runtime.shutdown().await.ok();
+            std::process::exit(code);
+        }
+    }
+
     runtime.run().await?;
 
     Ok(())
+}
+
+/// Wait for the root particle to die, and decide the node's fate (#41).
+///
+/// Returns the process exit code, or `None` if the node should keep running.
+async fn watch_root(
+    runtime: &Runtime,
+    root: plasmoid::Pid,
+    restart_type: plasmoid::app::RestartType,
+) -> Option<i32> {
+    use plasmoid::message::ExitReason;
+    let mut deaths = runtime.registry().subscribe_deaths();
+
+    loop {
+        let death = match deaths.recv().await {
+            Ok(d) => d,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => return Some(1),
+        };
+        if death.pid != root {
+            continue;
+        }
+
+        // Only `normal` is clean here -- `shutdown` is NOT.
+        //
+        // This is the third place "what counts as abnormal" is asked, and it
+        // takes the *opposite* answer to a `transient` child's restart rule,
+        // which does treat `shutdown` as clean. OTP's own note explains why: the
+        // transient application type "is of little practical use, because when a
+        // supervision tree terminates, the reason is set to shutdown, not
+        // normal". A tree that exceeded its restart intensity exits `shutdown`,
+        // and that is precisely the failure an operator needs to see -- so
+        // calling it clean would exit zero and stop `Restart=on-failure` ever
+        // firing.
+        let abnormal = !matches!(death.reason, ExitReason::Normal);
+
+        if !restart_type.should_stop_node(abnormal) {
+            eprintln!(
+                "Root particle exited ({:?}); node continues, as its type is {:?}.",
+                death.reason, restart_type
+            );
+            return None;
+        }
+
+        eprintln!(
+            "Root particle exited ({:?}); stopping the node.",
+            death.reason
+        );
+        // Non-zero on a failure so a process supervisor treats it as one.
+        return Some(if abnormal { 1 } else { 0 });
+    }
 }
 
 async fn cmd_spawn(args: &[String]) -> Result<()> {

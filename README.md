@@ -176,6 +176,8 @@ plasmoid new <app-name>              Create a new application workspace
 plasmoid component new <name>        Create a new component
 plasmoid start [options] [<wasm>...] Boot a node and load components
     --peer <node-id>                 Join the cluster that node belongs to
+    --app <manifest.toml>            Start an application: spawn its root and
+                                     exit the node when that root dies
 plasmoid spawn <component>           Spawn a particle on a running node
 plasmoid send <target> <message>     Send a message to a particle
 ```
@@ -250,6 +252,38 @@ interface host {
     log: func(level: log-level, message: string);
 }
 ```
+
+## Supervision
+
+A supervisor is an ordinary particle, as in OTP — the runtime does not know what a supervision tree is.
+
+```rust
+plasmoid_sdk::run_supervisor!(
+    SupFlags { strategy: Strategy::OneForOne, intensity: 1, period_ms: 5_000 },
+    vec![
+        ChildSpec::new("worker", "worker").restart(Restart::Permanent),
+        ChildSpec::new("job", "batch").restart(Restart::Transient),
+    ]
+);
+```
+
+`one_for_one` / `one_for_all` / `rest_for_one`; `permanent` / `transient` / `temporary`; `brutal-kill` / a timeout / `infinity` for shutdown. Children start left to right and stop in reverse. Exceed the restart intensity and the supervisor terminates its children and exits, rather than spinning.
+
+An **application** is declared by a manifest:
+
+```toml
+name = "my-app"
+root = "app"          # a loaded component
+type = "permanent"    # permanent | transient | temporary
+```
+
+```bash
+plasmoid start app.wasm --app plasmoid.toml
+```
+
+When a `permanent` root exits, so does the node — non-zero unless it exited `normal`. The runtime cannot see a supervision tree, so it cannot report that one collapsed; a dead process is something systemd, Kubernetes and Docker already understand. A node is therefore only as resilient as whatever restarts it.
+
+See [`components/supervised`](./components/supervised) for a worked example.
 
 ## Project Structure
 

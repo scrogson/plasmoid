@@ -31,6 +31,7 @@ cedar-policy = "4"
 postcard = { version = "1", features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml = "0.9"
 wasm-wave = "0.243"
 
 # Async
