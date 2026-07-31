@@ -233,3 +233,144 @@ mod boot {
         );
     }
 }
+
+/// Dynamic children: a pool whose members arrive and leave at runtime (#42/#44).
+mod dynamic {
+    use super::*;
+    use plasmoid::mailbox::{Mailbox, MailboxMessage};
+    use plasmoid_sdk::supervise::{SupervisorCommand, SupervisorOp};
+    use plasmoid_sdk::supervisor::{ChildSpec, Restart};
+    use std::sync::Arc;
+
+    /// Ask the pool to do something, as a particle would: a tagged message
+    /// carrying our own pid, because a `tagged-message` gives the receiver a ref
+    /// but no sender.
+    async fn ask(
+        runtime: &Runtime,
+        pool: &plasmoid::Pid,
+        caller: &plasmoid::Pid,
+        ref_id: u64,
+        op: SupervisorOp,
+    ) {
+        let cmd = SupervisorCommand {
+            // `resolve` matches the *Display* form, not `to_key`'s lossless
+            // hex. Supervision is node-local, so Display's truncated node
+            // prefix is unambiguous here -- it would not be across nodes.
+            reply_to: caller.to_string(),
+            op,
+        };
+        let payload = plasmoid_sdk::messaging::encode(&cmd);
+        runtime
+            .registry()
+            .send_tagged_to_pid(pool, ref_id, payload)
+            .await
+            .expect("the pool should accept a command");
+    }
+
+    fn job(id: &str, restart: Restart) -> ChildSpec {
+        ChildSpec::new(id, "supervised")
+            .init_args(format!(r#"{{"worker":{{"name":"{id}"}}}}"#))
+            .restart(restart)
+    }
+
+    #[tokio::test]
+    async fn test_children_can_be_added_and_removed_at_runtime() {
+        let Some(runtime) = runtime_with_component().await else {
+            return;
+        };
+
+        let pool = runtime
+            .spawn(
+                "supervised",
+                Some("pool"),
+                None,
+                r#"{"pool":{"intensity":5}}"#,
+            )
+            .await
+            .expect("the pool should start");
+
+        // A stand-in caller, so the pool has somewhere to send replies.
+        let inbox = Arc::new(Mailbox::new());
+        let caller = runtime.registry().insert_test_particle(inbox.clone()).await;
+
+        let before = alive(&runtime).await;
+        ask(
+            &runtime,
+            &pool,
+            &caller,
+            1,
+            SupervisorOp::StartChild(job("a", Restart::Permanent)),
+        )
+        .await;
+
+        assert!(
+            eventually(async || alive(&runtime).await > before).await,
+            "start_child should have produced a child"
+        );
+        match inbox.recv(Some(Duration::from_secs(10))).await {
+            Some(MailboxMessage::Tagged { ref_id, .. }) => assert_eq!(ref_id, 1),
+            other => panic!("expected a tagged reply correlating with our ref, got {other:?}"),
+        }
+
+        let with_child = alive(&runtime).await;
+        ask(
+            &runtime,
+            &pool,
+            &caller,
+            2,
+            SupervisorOp::TerminateChild("a".into()),
+        )
+        .await;
+        assert!(
+            eventually(async || alive(&runtime).await < with_child).await,
+            "terminate_child should have removed it"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_a_pool_of_temporary_workers_churns_without_collapsing() {
+        // The property #42 promised falls out of the restart type rather than a
+        // special case: a temporary child is never restarted, and intensity
+        // counts restarts. A worker-per-request pool would otherwise shoot
+        // itself under perfectly normal load.
+        let Some(runtime) = runtime_with_component().await else {
+            return;
+        };
+
+        // Intensity 1: a single genuine restart would end it.
+        let pool = runtime
+            .spawn(
+                "supervised",
+                Some("pool"),
+                None,
+                r#"{"pool":{"intensity":1}}"#,
+            )
+            .await
+            .expect("the pool should start");
+
+        let inbox = Arc::new(Mailbox::new());
+        let caller = runtime.registry().insert_test_particle(inbox.clone()).await;
+
+        // Twenty short-lived workers, each finishing normally.
+        for i in 0..20u64 {
+            let spec = ChildSpec::new(format!("job-{i}"), "supervised")
+                .init_args(format!(r#"{{"finisher":{{"name":"job-{i}"}}}}"#))
+                .restart(Restart::Temporary);
+            ask(
+                &runtime,
+                &pool,
+                &caller,
+                100 + i,
+                SupervisorOp::StartChild(spec),
+            )
+            .await;
+        }
+
+        tokio::time::sleep(Duration::from_secs(3)).await;
+
+        assert!(
+            runtime.registry().particle_exists(&pool).await,
+            "sustained churn of temporary workers must not trip restart intensity"
+        );
+    }
+}

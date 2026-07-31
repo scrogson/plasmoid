@@ -28,6 +28,8 @@ enum Role {
         intensity: u32,
         children: Vec<ChildDecl>,
     },
+    /// A pool: starts empty, children arrive by message (#42).
+    Pool { intensity: u32 },
     /// A worker that stays up until told otherwise.
     Worker { name: String },
     /// A worker that dies immediately with an abnormal reason.
@@ -58,6 +60,14 @@ impl bindings::Guest for Component {
                 intensity,
                 children,
             } => run_supervisor(&strategy, intensity, children),
+            Role::Pool { intensity } => {
+                host::log(host::LogLevel::Info, "pool up, awaiting children");
+                plasmoid_sdk::run_dynamic_supervisor!(SupFlags {
+                    strategy: Strategy::OneForOne,
+                    intensity,
+                    period_ms: 5_000,
+                });
+            }
             Role::Worker { name } => {
                 host::log(host::LogLevel::Info, &format!("worker {name} up"));
                 // Stay alive until something signals us.

@@ -283,6 +283,14 @@ plasmoid start app.wasm --app plasmoid.toml
 
 When a `permanent` root exits, so does the node — non-zero unless it exited `normal`. The runtime cannot see a supervision tree, so it cannot report that one collapsed; a dead process is something systemd, Kubernetes and Docker already understand. A node is therefore only as resilient as whatever restarts it.
 
+Children can also arrive at runtime:
+
+```rust
+plasmoid_sdk::run_dynamic_supervisor!(SupFlags { intensity: 5, ..Default::default() });
+```
+
+A dynamic supervisor starts empty and takes `start-child` / `terminate-child` as messages — a supervisor is a particle, not an object. Each child carries a whole spec, so a pool of `temporary` workers churns freely: intensity counts restarts, and a temporary child is never restarted.
+
 See [`components/supervised`](./components/supervised) for a worked example.
 
 ## Project Structure

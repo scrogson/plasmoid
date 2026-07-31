@@ -46,5 +46,8 @@ anyhow = "1"
 thiserror = "2"
 
 [dev-dependencies]
+# The supervision tests speak the SDK's own command types, so a test cannot
+# drift from what a real caller would send.
+plasmoid-sdk = { path = "crates/plasmoid-sdk" }
 tempfile = "3"
 wat = "1"

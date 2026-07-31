@@ -23,7 +23,7 @@ use std::collections::VecDeque;
 ///
 /// Mirrors the host's `exit-reason` so this module stays free of WIT bindings,
 /// which only exist inside a component crate.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ExitReason {
     Normal,
     Kill,
@@ -54,7 +54,7 @@ impl ExitReason {
 }
 
 /// When a terminated child is restarted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum Restart {
     /// Always restarted.
     #[default]
@@ -67,7 +67,7 @@ pub enum Restart {
 }
 
 /// How a child is stopped on purpose.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Shutdown {
     /// An untrappable kill, immediately.
     BrutalKill,
@@ -86,7 +86,7 @@ impl Default for Shutdown {
 }
 
 /// What to start, if this child needs starting.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Start {
     pub component: String,
     pub init_args: String,
@@ -101,7 +101,7 @@ pub struct Start {
 /// consolation prize.
 ///
 /// [#36]: https://github.com/scrogson/plasmoid/issues/36
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ChildSpec {
     /// Stable across restarts, unlike the pid. Mandatory.
     pub id: String,
@@ -617,5 +617,279 @@ mod tests {
             ["a"],
             "b is already dead and must not be signalled"
         );
+    }
+}
+
+/// A supervisor whose children arrive and leave at runtime (#42).
+///
+/// **Its own kind, not a fourth strategy.** `one_for_all` and `rest_for_one`
+/// are defined by *start order*, and children that arrive at arbitrary times
+/// have none — so those strategies are not merely unused here, they are
+/// meaningless, and this type makes them unreachable rather than ignored. OTP
+/// reaches the same place from the other direction: `simple_one_for_one` starts
+/// no children at init and shuts them down asynchronously, "the order in which
+/// they are stopped is not defined".
+///
+/// Each child carries a **whole** [`ChildSpec`]. OTP's `simple_one_for_one`
+/// keeps one template and appends per-instance arguments, which works because
+/// Erlang start arguments are a list; ours are a single string, so there would
+/// be nothing to append to. Carrying the whole spec removes the question — and
+/// makes restart *simpler* than OTP's, which must reconstitute a child's args
+/// from a `dynamics` map keyed by pid.
+pub struct DynamicSupervisor {
+    intensity: u32,
+    period_ms: u64,
+    /// Live children, in the order they were started. The order carries no
+    /// meaning; it is simply how they are stored.
+    children: Vec<ChildSpec>,
+    restarts: VecDeque<u64>,
+}
+
+/// Why a dynamic child could not be started.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartChildError {
+    /// An id already in use by a live child. OTP reports the same condition as
+    /// `{error, already_present}` / `{error, {already_started, Child}}`.
+    DuplicateId(String),
+}
+
+impl DynamicSupervisor {
+    pub fn new(flags: SupFlags) -> Self {
+        Self {
+            intensity: flags.intensity,
+            period_ms: flags.period_ms,
+            children: Vec::new(),
+            restarts: VecDeque::new(),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.children.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.children.is_empty()
+    }
+
+    pub fn contains(&self, id: &str) -> bool {
+        self.children.iter().any(|c| c.id == id)
+    }
+
+    /// Add a child and start it.
+    ///
+    /// Unlike OTP and Elixir, which ignore the id for dynamic children, the id
+    /// is kept and must be unique: it is how [`Self::terminate_child`] names a
+    /// child, and a pid changes on every restart.
+    pub fn start_child(&mut self, spec: ChildSpec) -> Result<Action, StartChildError> {
+        if self.contains(&spec.id) {
+            return Err(StartChildError::DuplicateId(spec.id));
+        }
+        self.children.push(spec.clone());
+        Ok(Action::Start(spec))
+    }
+
+    /// Stop a child by id. `None` if no such child is live.
+    pub fn terminate_child(&mut self, id: &str) -> Option<Action> {
+        let idx = self.children.iter().position(|c| c.id == id)?;
+        let child = self.children.remove(idx);
+        Some(Action::Stop {
+            id: child.id,
+            shutdown: child.shutdown,
+        })
+    }
+
+    /// Stop every child.
+    ///
+    /// Emitted in storage order, but **the order is not meaningful** — a
+    /// dynamic supervisor's children have no start order to reverse, and OTP
+    /// shuts its equivalent down asynchronously for the same reason. Ordered
+    /// teardown of a large pool would be slow and would promise something the
+    /// structure cannot deliver.
+    pub fn shutdown(&mut self) -> Vec<Action> {
+        self.children
+            .drain(..)
+            .map(|c| Action::Stop {
+                id: c.id,
+                shutdown: c.shutdown,
+            })
+            .collect()
+    }
+
+    /// A child exited. Restart it if its type says so.
+    ///
+    /// No strategy fan-out: siblings are independent by construction.
+    pub fn on_child_exit(&mut self, id: &str, reason: &ExitReason, now_ms: u64) -> Vec<Action> {
+        let Some(idx) = self.children.iter().position(|c| c.id == id) else {
+            return Vec::new();
+        };
+        let spec = self.children[idx].clone();
+
+        let restart = match spec.restart {
+            Restart::Permanent => true,
+            Restart::Temporary => false,
+            Restart::Transient => reason.warrants_restart(),
+        };
+
+        if !restart {
+            // Gone for good. Note this is *not* recorded as a restart, which is
+            // what lets a pool of temporary workers churn without ever tripping
+            // the brake: intensity counts restarts, not deaths.
+            self.children.remove(idx);
+            return Vec::new();
+        }
+
+        self.restarts.push_back(now_ms);
+        let cutoff = now_ms.saturating_sub(self.period_ms);
+        while let Some(&front) = self.restarts.front() {
+            if front < cutoff {
+                self.restarts.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        if self.restarts.len() as u32 > self.intensity {
+            let mut actions = self.shutdown();
+            actions.push(Action::GiveUp);
+            return actions;
+        }
+
+        vec![Action::Start(spec)]
+    }
+}
+
+#[cfg(test)]
+mod dynamic_tests {
+    use super::*;
+
+    fn flags(intensity: u32) -> SupFlags {
+        SupFlags {
+            strategy: Strategy::OneForOne, // unused; a dynamic supervisor has none
+            intensity,
+            period_ms: 5_000,
+        }
+    }
+
+    fn worker(id: &str, restart: Restart) -> ChildSpec {
+        ChildSpec::new(id, "worker").restart(restart)
+    }
+
+    #[test]
+    fn test_children_are_added_and_started() {
+        let mut s = DynamicSupervisor::new(flags(5));
+        let action = s.start_child(worker("a", Restart::Permanent)).unwrap();
+        assert!(matches!(action, Action::Start(c) if c.id == "a"));
+        assert_eq!(s.len(), 1);
+    }
+
+    #[test]
+    fn test_a_duplicate_id_is_refused() {
+        // #42 kept `id` mandatory where OTP and Elixir drop it, so it has to
+        // actually mean something: two live children cannot share one.
+        let mut s = DynamicSupervisor::new(flags(5));
+        s.start_child(worker("a", Restart::Permanent)).unwrap();
+        assert_eq!(
+            s.start_child(worker("a", Restart::Permanent)),
+            Err(StartChildError::DuplicateId("a".into()))
+        );
+        assert_eq!(s.len(), 1);
+    }
+
+    #[test]
+    fn test_a_child_is_terminated_by_id_not_pid() {
+        let mut s = DynamicSupervisor::new(flags(5));
+        s.start_child(worker("a", Restart::Permanent)).unwrap();
+        s.start_child(worker("b", Restart::Permanent)).unwrap();
+
+        let action = s.terminate_child("a").unwrap();
+        assert!(matches!(action, Action::Stop { id, .. } if id == "a"));
+        assert!(!s.contains("a"));
+        assert!(s.contains("b"), "siblings are independent");
+    }
+
+    #[test]
+    fn test_terminating_an_unknown_child_reports_nothing() {
+        let mut s = DynamicSupervisor::new(flags(5));
+        assert!(s.terminate_child("ghost").is_none());
+    }
+
+    #[test]
+    fn test_a_terminated_id_can_be_reused() {
+        // Pool members come and go; an id freed by termination must be usable
+        // again or a long-running pool eventually runs out of names.
+        let mut s = DynamicSupervisor::new(flags(5));
+        s.start_child(worker("slot", Restart::Permanent)).unwrap();
+        s.terminate_child("slot");
+        assert!(s.start_child(worker("slot", Restart::Permanent)).is_ok());
+    }
+
+    #[test]
+    fn test_a_crashed_permanent_child_is_restarted_alone() {
+        let mut s = DynamicSupervisor::new(flags(5));
+        s.start_child(worker("a", Restart::Permanent)).unwrap();
+        s.start_child(worker("b", Restart::Permanent)).unwrap();
+
+        let acts = s.on_child_exit("a", &ExitReason::Exception("boom".into()), 0);
+        assert_eq!(acts.len(), 1, "no strategy fan-out; siblings untouched");
+        assert!(matches!(&acts[0], Action::Start(c) if c.id == "a"));
+        assert_eq!(s.len(), 2);
+    }
+
+    #[test]
+    fn test_churn_of_temporary_children_never_trips_intensity() {
+        // The property #42 promised falls out with no special case: a temporary
+        // child is never restarted, and intensity counts restarts, not deaths.
+        // A worker-per-request pool would otherwise shoot itself under load.
+        let mut s = DynamicSupervisor::new(flags(1));
+
+        for i in 0..500 {
+            let id = format!("job-{i}");
+            s.start_child(worker(&id, Restart::Temporary)).unwrap();
+            let acts = s.on_child_exit(&id, &ExitReason::Normal, i as u64);
+            assert!(acts.is_empty(), "a finished temporary worker just goes");
+        }
+
+        assert!(s.is_empty(), "the pool drains rather than accumulating");
+    }
+
+    #[test]
+    fn test_a_permanent_child_crashing_repeatedly_still_trips_intensity() {
+        // The counterpart: churn is free only because nothing is being
+        // restarted. A permanent child failing over and over IS failure.
+        let mut s = DynamicSupervisor::new(flags(2));
+        s.start_child(worker("a", Restart::Permanent)).unwrap();
+
+        for t in [0u64, 1] {
+            let acts = s.on_child_exit("a", &ExitReason::Exception("boom".into()), t);
+            assert!(!acts.contains(&Action::GiveUp));
+        }
+        let acts = s.on_child_exit("a", &ExitReason::Exception("boom".into()), 2);
+        assert!(acts.contains(&Action::GiveUp));
+    }
+
+    #[test]
+    fn test_giving_up_stops_every_child_first() {
+        let mut s = DynamicSupervisor::new(flags(0));
+        s.start_child(worker("a", Restart::Permanent)).unwrap();
+        s.start_child(worker("b", Restart::Permanent)).unwrap();
+
+        let acts = s.on_child_exit("a", &ExitReason::Exception("boom".into()), 0);
+        assert_eq!(*acts.last().unwrap(), Action::GiveUp, "GiveUp is last");
+        assert!(
+            acts.iter()
+                .any(|a| matches!(a, Action::Stop { id, .. } if id == "b")),
+            "the surviving child is stopped before the supervisor exits"
+        );
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn test_shutdown_stops_every_child() {
+        let mut s = DynamicSupervisor::new(flags(5));
+        for id in ["a", "b", "c"] {
+            s.start_child(worker(id, Restart::Permanent)).unwrap();
+        }
+        assert_eq!(s.shutdown().len(), 3);
+        assert!(s.is_empty());
     }
 }

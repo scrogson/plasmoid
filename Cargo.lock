@@ -3371,6 +3371,7 @@ dependencies = [
  "hex",
  "iroh",
  "iroh-mdns-address-lookup",
+ "plasmoid-sdk",
  "postcard",
  "serde",
  "serde_json",
